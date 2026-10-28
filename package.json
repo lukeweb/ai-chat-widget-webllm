@@ -1,0 +1,36 @@
+{
+  "name": "ai-chat-widget",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "run-p type-check \"build-only {@}\" --",
+    "preview": "vite preview",
+    "build-only": "vite build",
+    "type-check": "vue-tsc --build",
+    "test": "jest",
+    "test:type-check": "tsc --project tsconfig.test.json --noEmit"
+  },
+  "dependencies": {
+    "@mlc-ai/web-llm": "^0.2.86",
+    "vue": "^3.5.42"
+  },
+  "devDependencies": {
+    "@tsconfig/node24": "^24.0.5",
+    "@types/jest": "^30.0.0",
+    "@types/node": "^26.6.5",
+    "@vitejs/plugin-vue": "^6.0.8",
+    "@vue/tsconfig": "^0.9.1",
+    "jest": "^30.5.2",
+    "npm-run-all2": "^9.0.3",
+    "ts-jest": "^29.4.15",
+    "typescript": "~6.0.0",
+    "vite": "^8.2.2",
+    "vite-plugin-vue-devtools": "^8.2.1",
+    "vue-tsc": "^3.3.11"
+  },
+  "engines": {
+    "node": "^22.18.0 || >=24.12.0"
+  }
+}
