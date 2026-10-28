@@ -1,4 +1,5 @@
 import { describe, it, expect, afterEach, beforeEach, jest } from "@jest/globals";
+import { SYSTEM_PROMPT } from "../../src/config/systemPrompt";
 
 jest.mock("@mlc-ai/web-llm", () => ({
   CreateWebWorkerMLCEngine: jest.fn(),
@@ -164,7 +165,7 @@ describe("aiEngine", () => {
       });
       expect(onToken.mock.calls).toEqual([["Hello"], [" there"]]);
       expect(engine.chat.completions.create.mock.calls[0]![0].messages).toEqual([
-        { role: "system", content: "\n\nextra context" },
+        { role: "system", content: `${SYSTEM_PROMPT}\n\nextra context` },
         { role: "user", content: "Hi" },
       ]);
 
@@ -173,7 +174,7 @@ describe("aiEngine", () => {
       );
       await api.sendMessage("Follow up", jest.fn());
       expect(engine.chat.completions.create.mock.calls[1]![0].messages).toEqual([
-        { role: "system", content: "" },
+        { role: "system", content: SYSTEM_PROMPT },
         { role: "user", content: "Hi" },
         { role: "assistant", content: "Hello there" },
         { role: "user", content: "Follow up" },
@@ -218,7 +219,7 @@ describe("aiEngine", () => {
       engine.chat.completions.create.mockResolvedValueOnce(stream({ choices: [{}] }));
       await api.sendMessage("after reset", jest.fn());
       expect(engine.chat.completions.create.mock.calls[2]![0].messages).toEqual([
-        { role: "system", content: "" },
+        { role: "system", content: SYSTEM_PROMPT },
         { role: "user", content: "after reset" },
       ]);
     });

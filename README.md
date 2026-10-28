@@ -4,7 +4,8 @@ A small, embeddable chat widget built with Vue 3 and Vite. It uses [WebLLM](http
 
 The widget is registered as a custom element and is added to the page automatically when the application script loads. It stays hidden when WebGPU is unavailable or model initialization fails. The first model load may take time while the browser fetches the model assets.
 
-** NOTE ** This project was created with OpenAI Codex as a learning exercise in building simple applications with minimal coding and using AI to diagnose and fix code errors.
+**NOTE:**
+**This project was created with OpenAI Codex as a learning exercise in building simple applications with minimal coding and using AI to diagnose and fix code errors.**
 
 ## Requirements
 
@@ -44,6 +45,12 @@ Run the unit tests:
 
 ```sh
 yarn test
+```
+
+Run ESLint:
+
+```sh
+yarn lint
 ```
 
 Type-check the test files:
