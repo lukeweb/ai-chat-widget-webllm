@@ -51,6 +51,11 @@ const send = async () => {
     const result = await sendMessage(text, (token) => {
       reply.text += token;
     });
+    if (result.aborted) {
+      const replyIndex = messages.value.indexOf(reply);
+      if (!reply.text && replyIndex !== -1) messages.value.splice(replyIndex, 1);
+      return;
+    }
     if (result.truncated) reply.text += " …";
     if (!reply.text) reply.text = "Failed to generate a response.";
   } catch {

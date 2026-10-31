@@ -1,6 +1,10 @@
 import { describe, it, expect, afterEach, beforeEach, jest } from "@jest/globals";
 import { SYSTEM_PROMPT } from "../../src/config/systemPrompt";
 
+jest.mock("../../src/services/retriever", () => ({
+  retrieve: jest.fn(),
+}));
+
 jest.mock("@mlc-ai/web-llm", () => ({
   CreateWebWorkerMLCEngine: jest.fn(),
 }));
@@ -43,6 +47,7 @@ const stream = async function* (...chunks: Chunk[]): AsyncGenerator<Chunk> {
 describe("aiEngine", () => {
   let api: typeof import("../../src/services/aiEngine");
   let createEngine: jest.Mock<EngineCreator>;
+  let retrieveMock: jest.Mock<(content: string) => Promise<string>>;
   let MockWorker: typeof import("../mocks/workerMock").default;
 
   beforeEach(() => {
@@ -52,6 +57,10 @@ describe("aiEngine", () => {
       CreateWebWorkerMLCEngine: jest.Mock<EngineCreator>;
     };
     createEngine = webLlmMock.CreateWebWorkerMLCEngine;
+    retrieveMock = (jest.requireMock("../../src/services/retriever") as {
+      retrieve: jest.Mock<(content: string) => Promise<string>>;
+    }).retrieve;
+    retrieveMock.mockResolvedValue("retrieved context");
     MockWorker = jest.requireActual<typeof import("../mocks/workerMock")>(
       "../mocks/workerMock"
     ).default;
@@ -164,9 +173,13 @@ describe("aiEngine", () => {
         truncated: true,
       });
       expect(onToken.mock.calls).toEqual([["Hello"], [" there"]]);
+      expect(retrieveMock).toHaveBeenCalledWith("Hi");
       expect(engine.chat.completions.create.mock.calls[0]![0].messages).toEqual([
-        { role: "system", content: `${SYSTEM_PROMPT}\n\nextra context` },
-        { role: "user", content: "Hi" },
+        { role: "system", content: SYSTEM_PROMPT },
+        {
+          role: "user",
+          content: "Context:\nextra context\nretrieved context\nQuestion:\nHi",
+        },
       ]);
 
       engine.chat.completions.create.mockResolvedValue(
@@ -177,7 +190,10 @@ describe("aiEngine", () => {
         { role: "system", content: SYSTEM_PROMPT },
         { role: "user", content: "Hi" },
         { role: "assistant", content: "Hello there" },
-        { role: "user", content: "Follow up" },
+        {
+          role: "user",
+          content: "Context:\nretrieved context\nQuestion:\nFollow up",
+        },
       ]);
     });
 
@@ -220,8 +236,62 @@ describe("aiEngine", () => {
       await api.sendMessage("after reset", jest.fn());
       expect(engine.chat.completions.create.mock.calls[2]![0].messages).toEqual([
         { role: "system", content: SYSTEM_PROMPT },
-        { role: "user", content: "after reset" },
+        {
+          role: "user",
+          content: "Context:\nretrieved context\nQuestion:\nafter reset",
+        },
       ]);
+    });
+
+    it("releases the generation lock when retrieval fails and does not call the model", async () => {
+      const engine = await initialize();
+      retrieveMock.mockRejectedValueOnce(new Error("retrieval failed"));
+
+      await expect(api.sendMessage("Question", jest.fn())).rejects.toThrow("retrieval failed");
+      expect(engine.chat.completions.create).not.toHaveBeenCalled();
+
+      engine.chat.completions.create.mockResolvedValue(
+        stream({ choices: [{ delta: { content: "Answer" }, finish_reason: "stop" }] })
+      );
+      await expect(api.sendMessage("Retry", jest.fn())).resolves.toMatchObject({ text: "Answer" });
+    });
+
+    it("skips model generation when aborted during retrieval", async () => {
+      const engine = await initialize();
+      let resolveRetrieval!: (context: string) => void;
+      retrieveMock.mockReturnValue(
+        new Promise<string>((resolve) => {
+          resolveRetrieval = resolve;
+        })
+      );
+
+      const pendingSend = api.sendMessage("Question", jest.fn());
+      api.abort();
+      resolveRetrieval("retrieved context");
+
+      await expect(pendingSend).resolves.toEqual({
+        text: "",
+        truncated: false,
+        aborted: true,
+      });
+      expect(engine.chat.completions.create).not.toHaveBeenCalled();
+    });
+
+    it("does not start model generation if disposed during retrieval", async () => {
+      const engine = await initialize();
+      let resolveRetrieval!: (context: string) => void;
+      retrieveMock.mockReturnValue(
+        new Promise<string>((resolve) => {
+          resolveRetrieval = resolve;
+        })
+      );
+
+      const pendingSend = api.sendMessage("Question", jest.fn());
+      await api.disposeEngine();
+      resolveRetrieval("retrieved context");
+
+      await expect(pendingSend).resolves.toMatchObject({ aborted: true });
+      expect(engine.chat.completions.create).not.toHaveBeenCalled();
     });
 
     it("unloads and terminates resources on disposal", async () => {

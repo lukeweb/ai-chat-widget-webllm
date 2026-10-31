@@ -7,12 +7,14 @@ import {
 import { MAX_HISTORY_MESSAGES, MODEL_ID } from "@/config/appConfig";
 import { SYSTEM_PROMPT } from "@/config/systemPrompt";
 import EngineWorker from "./aiEngine.worker?worker&inline";
+import { retrieve } from "./retriever";
 
 let engine: MLCEngineInterface | null = null;
 let initPromise: Promise<void> | null = null;
 let worker: Worker | null = null;
 
 let generating = false;
+let abortRequested = false;
 let initGeneration = 0;
 
 const history: ChatCompletionMessageParam[] = [];
@@ -57,23 +59,30 @@ export const initEngine = async (onProgress: (p: number, text: string) => void):
 export const sendMessage = async (
   userMessage: string,
   onToken: (t: string) => void,
-  context = ""
-): Promise<{ text: string; truncated: boolean }> => {
+  context: string = ""
+): Promise<{ text: string; truncated: boolean; aborted?: boolean }> => {
   const currentEngine = engine;
   if (!currentEngine) throw new Error("Engine not initialized");
   if (generating) throw new Error("Generation already in progress");
   const generation = initGeneration;
   generating = true;
+  abortRequested = false;
 
   let fullResponse = "";
   let finishReason: string | null = null;
 
   try {
+    const extContext = await retrieve(userMessage);
+    if (abortRequested || generation !== initGeneration || engine !== currentEngine) {
+      return { text: fullResponse, truncated: false, aborted: true };
+    }
+
+    const messageContext = context === "" ? extContext : `${context}\n${extContext}`;
     const stream: AsyncIterable<ChatCompletionChunk> = await currentEngine.chat.completions.create({
       messages: [
-        { role: "system", content: context ? `${SYSTEM_PROMPT}\n\n${context}` : SYSTEM_PROMPT },
+        { role: "system", content: SYSTEM_PROMPT },
         ...history,
-        { role: "user", content: userMessage },
+        { role: "user", content: `Context:\n${messageContext}\nQuestion:\n${userMessage}` },
       ],
       stream: true,
       temperature: 0.2,
@@ -96,13 +105,25 @@ export const sendMessage = async (
       history.splice(0, Math.max(0, history.length - MAX_HISTORY_MESSAGES));
     }
 
-    return { text: fullResponse, truncated: finishReason === "length" };
+    return {
+      text: fullResponse,
+      truncated: finishReason === "length",
+      ...(abortRequested ? { aborted: true } : {}),
+    };
+  } catch (error) {
+    if (abortRequested || generation !== initGeneration || engine !== currentEngine) {
+      return { text: fullResponse, truncated: false, aborted: true };
+    }
+    throw error;
   } finally {
     generating = false;
+    abortRequested = false;
   }
 };
 
 export const abort = (): void => {
+  if (!generating) return;
+  abortRequested = true;
   engine?.interruptGenerate();
 };
 
