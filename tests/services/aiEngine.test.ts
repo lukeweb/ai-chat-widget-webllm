@@ -27,7 +27,9 @@ type CreateCompletion = (request: CompletionRequest) => Promise<AsyncIterable<Ch
 type EngineCreator = (
   worker: Worker,
   modelId: string,
-  options: { initProgressCallback: (progress: { progress: number; text: string }) => void }
+  options: {
+    initProgressCallback: (progress: { progress: number; text: string; timeElapsed?: number }) => void;
+  }
 ) => Promise<EngineStub>;
 
 const makeEngine = (): EngineStub => ({
@@ -79,6 +81,19 @@ describe("aiEngine", () => {
     createEngine.mockResolvedValue(engine);
     await api.initEngine(jest.fn());
     return engine;
+  };
+
+  const mockAvailableWebGpu = (
+    requestAdapter: jest.Mock<() => Promise<unknown>> = jest
+      .fn<() => Promise<unknown>>()
+      .mockResolvedValue({})
+  ) => {
+    Object.defineProperty(globalThis, "window", { value: {}, configurable: true });
+    Object.defineProperty(globalThis, "navigator", {
+      value: { gpu: { requestAdapter } },
+      configurable: true,
+    });
+    return requestAdapter;
   };
 
   describe("isWebGpuAvailable", () => {
@@ -157,6 +172,100 @@ describe("aiEngine", () => {
     });
   });
 
+  describe("model initialization status", () => {
+    it("starts idle, reports preparation progress, then becomes ready", async () => {
+      mockAvailableWebGpu();
+      const engine = makeEngine();
+      const observedStates: Array<{ state: string; progress?: number }> = [];
+      createEngine.mockImplementation((_worker, _modelId, options) => {
+        options.initProgressCallback({
+          progress: 0.37,
+          text: "Fetching param cache[2/4]: 37% completed",
+          timeElapsed: 2,
+        });
+        observedStates.push(api.modelStatus.value);
+        return Promise.resolve(engine);
+      });
+
+      expect(api.modelStatus.value).toEqual({ state: "idle" });
+      await api.initializeModel();
+
+      expect(observedStates).toEqual([{ state: "preparing", progress: 0.37 }]);
+      expect(api.modelStatus.value).toEqual({ state: "ready" });
+    });
+
+    it("treats cached model loading and shader progress as initialization, not download", async () => {
+      mockAvailableWebGpu();
+      const engine = makeEngine();
+      const observedStates: Array<{ state: string; progress?: number }> = [];
+      createEngine.mockImplementation((_worker, _modelId, options) => {
+        options.initProgressCallback({ progress: 0.8, text: "Loading model from cache[3/4]" });
+        observedStates.push(api.modelStatus.value);
+        options.initProgressCallback({ progress: 0.5, text: "Loading GPU shader modules[4/8]" });
+        observedStates.push(api.modelStatus.value);
+        return Promise.resolve(engine);
+      });
+
+      await api.initializeModel();
+
+      expect(observedStates).toEqual([{ state: "initializing" }, { state: "initializing" }]);
+      expect(api.modelStatus.value).toEqual({ state: "ready" });
+    });
+
+    it("retains initialization errors and allows a retry", async () => {
+      mockAvailableWebGpu();
+      createEngine.mockRejectedValueOnce(new Error("download failed"));
+
+      await expect(api.initializeModel()).rejects.toThrow("download failed");
+      expect(api.modelStatus.value).toEqual({ state: "error", message: "download failed" });
+
+      const engine = makeEngine();
+      createEngine.mockResolvedValueOnce(engine);
+      await api.initializeModel();
+
+      expect(createEngine).toHaveBeenCalledTimes(2);
+      expect(api.modelStatus.value).toEqual({ state: "ready" });
+    });
+
+    it("reports WebGPU unavailability as an error without creating a worker", async () => {
+      mockAvailableWebGpu(jest.fn<() => Promise<unknown>>().mockResolvedValue(null));
+
+      await expect(api.initializeModel()).rejects.toThrow("WebGPU is unavailable");
+
+      expect(createEngine).not.toHaveBeenCalled();
+      expect(api.modelStatus.value).toEqual({
+        state: "error",
+        message: "WebGPU is unavailable or no compatible adapter was found.",
+      });
+    });
+
+    it("shares concurrent initialization and marks disposal during load as cancelled", async () => {
+      mockAvailableWebGpu();
+      let resolveCreation!: (engine: EngineStub) => void;
+      createEngine.mockReturnValue(
+        new Promise<EngineStub>((resolve) => {
+          resolveCreation = resolve;
+        })
+      );
+
+      const first = api.initializeModel();
+      const second = api.initializeModel();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(createEngine).toHaveBeenCalledTimes(1);
+
+      const disposed = api.disposeEngine();
+      const engine = makeEngine();
+      resolveCreation(engine);
+
+      await disposed;
+      await expect(first).rejects.toThrow("Engine was disposed during initialization");
+      await expect(second).rejects.toThrow("Engine was disposed during initialization");
+      expect(engine.unload).toHaveBeenCalledTimes(1);
+      expect(api.modelStatus.value).toEqual({ state: "cancelled" });
+    });
+  });
+
   describe("sendMessage and conversation controls", () => {
     it("streams tokens, passes context, stores the exchange, and reports truncation", async () => {
       const engine = await initialize();
@@ -199,6 +308,7 @@ describe("aiEngine", () => {
 
     it("rejects sends before initialization and while another generation is active", async () => {
       await expect(api.sendMessage("Hi", jest.fn())).rejects.toThrow("Engine not initialized");
+      expect(retrieveMock).not.toHaveBeenCalled();
       const engine = await initialize();
       let release!: () => void;
       engine.chat.completions.create.mockResolvedValue(

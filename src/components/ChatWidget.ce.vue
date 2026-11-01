@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { ref, watch, nextTick, onMounted, onBeforeUnmount } from "vue";
+import { computed, ref, watch, nextTick, onBeforeUnmount } from "vue";
 import { TEASER_DELAY_MS, TEASER_VISIBLE_MS } from "@/config/appConfig";
 import {
-  isWebGpuAvailable,
-  initEngine,
+  initializeModel,
+  modelStatus,
   sendMessage,
   abort,
   disposeEngine,
@@ -11,8 +11,6 @@ import {
 
 type Msg = { role: "user" | "assistant"; text: string };
 
-// The widget renders nothing until the model is loaded, progress goes to the console only
-const ready = ref(false);
 const open = ref(false);
 const teaser = ref(false);
 const input = ref("");
@@ -23,7 +21,51 @@ const messages = ref<Msg[]>([{ role: "assistant", text: "Hello! How can I help?"
 
 let teaserShowTimer: number | undefined;
 let teaserHideTimer: number | undefined;
-let mounted = false;
+
+const modelStatusLabel = computed(() => {
+  switch (modelStatus.value.state) {
+    case "idle":
+      return "Model has not started loading";
+    case "preparing":
+      return `Preparing model: ${Math.floor(modelStatus.value.progress * 100)}%`;
+    case "initializing":
+      return "Preparing the model…";
+    case "ready":
+      return "Ready to chat";
+    case "error":
+      return "Model failed to load";
+    case "cancelled":
+      return "Model initialization was cancelled";
+    default:
+      return "Model status unavailable";
+  }
+});
+
+const sendNotice = ref("");
+const retryInitialization = async () => {
+  sendNotice.value = "";
+  try {
+    await initializeModel();
+  } catch {
+    // The manager retains the failure details in modelStatus and logs the original error.
+  }
+};
+
+watch(
+  modelStatus,
+  (status) => {
+    if (status.state === "ready") sendNotice.value = "";
+    if (status.state === "ready" && teaserShowTimer === undefined) {
+      teaserShowTimer = window.setTimeout(() => {
+        teaser.value = true;
+        teaserHideTimer = window.setTimeout(() => {
+          teaser.value = false;
+        }, TEASER_VISIBLE_MS);
+      }, TEASER_DELAY_MS);
+    }
+  },
+  { immediate: true }
+);
 
 const toggle = async () => {
   open.value = !open.value;
@@ -36,8 +78,16 @@ const toggle = async () => {
 
 const send = async () => {
   const text = input.value.trim();
-  if (!text || generating.value || !ready.value) return;
+  if (!text || generating.value) return;
+  if (modelStatus.value.state !== "ready") {
+    sendNotice.value =
+      modelStatus.value.state === "error"
+        ? "The model could not be loaded. Retry loading before sending your message."
+        : "The model is still preparing. Your message has not been sent.";
+    return;
+  }
   input.value = "";
+  sendNotice.value = "";
 
   messages.value.push({ role: "user", text });
   messages.value.push({ role: "assistant", text: "" });
@@ -74,46 +124,7 @@ watch(
   { deep: true, flush: "post" }
 );
 
-onMounted(async () => {
-  mounted = true;
-
-  if (!(await isWebGpuAvailable())) {
-    if (!mounted) return;
-    console.info("[ai-widget] WebGPU is not available, the widget stays hidden");
-    return;
-  }
-  if (!mounted) return;
-
-  let lastLoggedPercent = -1;
-  try {
-    await initEngine((p, text) => {
-      // Log every 10% to keep the console readable
-      const percent = Math.floor(p * 10) * 10;
-      if (percent !== lastLoggedPercent) {
-        lastLoggedPercent = percent;
-        console.info(`[ai-widget] loading model: ${percent}% ${text}`);
-      }
-    });
-  } catch (error) {
-    if (!mounted) return;
-    console.error("[ai-widget] model failed to load, the widget stays hidden", error);
-    return;
-  }
-
-  if (!mounted) return;
-  console.info("[ai-widget] model ready");
-  ready.value = true;
-
-  teaserShowTimer = window.setTimeout(() => {
-    teaser.value = true;
-    teaserHideTimer = window.setTimeout(() => {
-      teaser.value = false;
-    }, TEASER_VISIBLE_MS);
-  }, TEASER_DELAY_MS);
-});
-
 onBeforeUnmount(() => {
-  mounted = false;
   window.clearTimeout(teaserShowTimer);
   window.clearTimeout(teaserHideTimer);
   disposeEngine();
@@ -121,7 +132,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div v-if="ready" class="root">
+  <div class="root">
     <Transition name="window">
       <section
         v-show="open"
@@ -140,12 +151,34 @@ onBeforeUnmount(() => {
           </div>
           <div class="title">
             <strong>Assistant</strong>
-            <span class="status"><i class="dot"></i>Ready to chat</span>
+            <span class="status" :class="`model-${modelStatus.state}`">
+              <i class="dot"></i>{{ modelStatusLabel }}
+            </span>
           </div>
           <button class="icon-btn" aria-label="Close chat" @click="toggle">
             <svg class="icon" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12" /></svg>
           </button>
         </header>
+
+        <div class="model-status" role="status" aria-live="polite">
+          <span v-if="modelStatus.state === 'error'">{{ modelStatus.message }}</span>
+          <span v-else-if="sendNotice">{{ sendNotice }}</span>
+          <span v-else-if="modelStatus.state === 'preparing'">
+            Preparing model ({{ Math.floor(modelStatus.progress * 100) }}%)…
+          </span>
+          <span v-else-if="modelStatus.state === 'initializing'">Preparing the model…</span>
+          <span v-else-if="modelStatus.state === 'cancelled'">Model initialization was cancelled.</span>
+          <span v-else-if="modelStatus.state === 'idle'">Model has not started loading.</span>
+          <span v-else>Model is ready.</span>
+          <button
+            v-if="modelStatus.state === 'error' || modelStatus.state === 'cancelled'"
+            type="button"
+            class="retry"
+            @click="retryInitialization"
+          >
+            Retry
+          </button>
+        </div>
 
         <div ref="listEl" class="messages" aria-live="polite">
           <div v-for="(m, i) in messages" :key="i" class="row" :class="m.role">
@@ -417,6 +450,55 @@ button {
   gap: 6px;
   font-size: 12px;
   opacity: 0.9;
+}
+
+.model-error {
+  color: #fee2e2;
+}
+
+.model-preparing .dot,
+.model-initializing .dot,
+.model-idle .dot,
+.model-cancelled .dot {
+  background: #facc15;
+}
+
+.model-error .dot {
+  background: #fca5a5;
+}
+
+.model-ready .dot {
+  background: #4ade80;
+}
+
+.model-status {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
+}
+
+.model-status:has(.retry) {
+  color: #b91c1c;
+}
+
+.retry {
+  flex-shrink: 0;
+  padding: 3px 9px;
+  border: 1px solid currentColor;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  font-size: 12px;
+}
+
+.retry:hover {
+  background: var(--surface);
 }
 
 .dot {

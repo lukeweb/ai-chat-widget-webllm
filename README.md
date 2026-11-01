@@ -2,7 +2,7 @@
 
 A small, embeddable chat widget built with Vue 3 and Vite. It uses [WebLLM](https://github.com/mlc-ai/web-llm) to run a language model in the browser with WebGPU, so chat generation runs on the visitor's device.
 
-The widget is registered as a custom element and is added to the page automatically when the application script loads. It stays hidden when WebGPU is unavailable or model initialization fails. The first model load may take time while the browser fetches the model assets.
+The widget is registered as a custom element and is added to the page automatically when the application script loads. Its interface appears immediately while the model initializes asynchronously. If WebGPU is unavailable or initialization fails, the chat remains visible and displays the error with an option to retry. The first model load may take time while the browser fetches the model assets.
 
 **NOTE:**
 **This project was created with OpenAI Codex as a learning exercise in building simple applications with minimal coding and using AI to diagnose and fix code errors.**
@@ -21,10 +21,10 @@ Install the dependencies:
 yarn install
 ```
 
-Create a `.env` file in the project root with the following settings. `.env` is gitignored, so create this file locally before running or building the app.
+Copy `.env.example` to `.env` in the project root. `.env` is gitignored, so create this file locally before running or building the app. Adjust the settings as needed.
 
 ```dotenv
-VITE_MODEL_ID=Qwen2.5-3B-Instruct-q4f16_1-MLC
+VITE_MODEL_ID=Qwen2.5-1.5B-Instruct-q4f16_1-MLC
 VITE_MAX_HISTORY_MESSAGES=12
 VITE_TEASER_DELAY_MS=800
 VITE_TEASER_VISIBLE_MS=10000
@@ -75,18 +75,18 @@ The production files are written to `dist/`. The entry script registers the conf
 
 ## How it works
 
-1. The entry point registers the widget using the configured custom element name and mounts it on the page.
-2. The widget checks for a WebGPU adapter and initializes the configured WebLLM model in a web worker.
+1. The entry point registers the widget using the configured custom element name and mounts it on the page, then starts model initialization without waiting for it.
+2. The AI engine checks for a WebGPU adapter and initializes the configured WebLLM model in a web worker. The widget observes the engine status and shows preparation progress when available, initialization state, or an error with a retry option.
 3. User messages are sent to the local model. Response tokens stream into the chat, and recent exchanges are kept in memory for conversation context.
 4. The model ID, conversation history limit, teaser timings, and element name are read from `.env` during the Vite build.
 
 The system prompt and knowledge base are maintained separately in `src/config/systemPrompt.ts`.
 
-Model initialization progress is logged in the browser console, along with a message when the model is ready or fails to load. The progress logs are emitted in 10% increments.
+Model status is displayed in the chat interface. The browser console also logs model initialization failures. A percentage is shown only when the runtime reports download progress; other initialization work is presented without an estimated percentage.
 
 ## Production considerations
 
-- **Browser and device support:** The widget requires WebGPU. Devices without a compatible adapter will not show the widget, and lower-powered devices may generate responses slowly.
+- **Browser and device support:** Chat UI remains visible without WebGPU, but model initialization reports an error and generation is unavailable. Lower-powered compatible devices may generate responses slowly.
 - **Download and memory use:** The model is large. Its initial download can take time and use significant bandwidth, storage, and GPU memory. Test startup time and memory use on the devices your audience uses.
 - **Client-side configuration:** Vite embeds `VITE_` settings in the public bundle. The model configuration, system prompt, and any knowledge base included in the app can be inspected by users; do not put secrets or private data in them.
 - **No server-side controls:** Inference runs in the visitor's browser. Add a server-side service if production needs centralized access control, rate limiting, monitoring, or moderation.

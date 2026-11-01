@@ -4,6 +4,7 @@ import {
   type ChatCompletionMessageParam,
   type ChatCompletionChunk,
 } from "@mlc-ai/web-llm";
+import { readonly, shallowRef } from "vue";
 import { MAX_HISTORY_MESSAGES, MODEL_ID } from "@/config/appConfig";
 import { SYSTEM_PROMPT } from "@/config/systemPrompt";
 import EngineWorker from "./aiEngine.worker?worker&inline";
@@ -17,6 +18,17 @@ let generating = false;
 let abortRequested = false;
 let initGeneration = 0;
 
+export type ModelStatus =
+  | { state: "idle" }
+  | { state: "preparing"; progress: number }
+  | { state: "initializing" }
+  | { state: "ready" }
+  | { state: "error"; message: string }
+  | { state: "cancelled" };
+
+const mutableModelStatus = shallowRef<ModelStatus>({ state: "idle" });
+export const modelStatus = readonly(mutableModelStatus);
+
 const history: ChatCompletionMessageParam[] = [];
 
 export const isWebGpuAvailable = async (): Promise<boolean> => {
@@ -26,6 +38,45 @@ export const isWebGpuAvailable = async (): Promise<boolean> => {
     return (await navigator.gpu.requestAdapter()) != null;
   } catch {
     return false;
+  }
+};
+
+const errorMessage = (error: unknown): string =>
+  error instanceof Error ? error.message : String(error);
+
+export const initializeModel = async (): Promise<void> => {
+  if (mutableModelStatus.value.state === "ready") return;
+  if (initPromise) return initPromise;
+
+  const generation = initGeneration;
+  mutableModelStatus.value = { state: "initializing" };
+
+  try {
+    if (!(await isWebGpuAvailable())) {
+      throw new Error("WebGPU is unavailable or no compatible adapter was found.");
+    }
+    if (generation !== initGeneration) {
+      return;
+    }
+
+    await initEngine((progress, text) => {
+      if (text.startsWith("Fetching param cache")) {
+        mutableModelStatus.value = { state: "preparing", progress };
+      } else {
+        // Other progress values describe cache loading or GPU setup, not total download progress.
+        mutableModelStatus.value = { state: "initializing" };
+      }
+    });
+
+    mutableModelStatus.value = { state: "ready" };
+  } catch (error) {
+    if (generation !== initGeneration) {
+      throw error;
+    }
+
+    mutableModelStatus.value = { state: "error", message: errorMessage(error) };
+    console.error("[ai-widget] model initialization failed", error);
+    throw error;
   }
 };
 
@@ -140,6 +191,8 @@ export const disposeEngine = async (): Promise<void> => {
   initPromise = null;
   initGeneration++;
   history.length = 0;
+
+  mutableModelStatus.value = { state: "cancelled" };
 
   try {
     if (generating) currentEngine?.interruptGenerate();

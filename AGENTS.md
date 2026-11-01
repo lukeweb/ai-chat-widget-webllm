@@ -15,13 +15,14 @@ A small project that adds a simple AI assistant to a website. The LLM runs direc
 ## Current state
 
 - Status: MVP — core functionality is implemented.
-- Implemented features: The LLM runs directly in the user's browser.
-- Known limitations: Browser and device compatibility may be limited and should be verified when developing or modifying features.
+- Implemented features: The chat UI mounts immediately; model initialization runs asynchronously through the AI engine service and Web Worker. The service exposes model status for the UI, including preparation progress when available, readiness, errors, and retry support. Messages can be drafted during initialization but are sent only when the model is ready. The LLM runs directly in the user's browser.
+- Known limitations: Browser and device compatibility may be limited and should be verified when developing or modifying features. Without WebGPU, the chat remains visible but generation is unavailable.
 
 ## Repository structure
 
 ├── AGENTS.md
 ├── README.md
+├── .env.example — sample public build-time configuration.
 ├── env.d.ts — environment and type declarations.
 ├── index.html — HTML entry point used by Vite.
 ├── jest.config.cjs — Jest configuration.
@@ -32,7 +33,7 @@ A small project that adds a simple AI assistant to a website. The LLM runs direc
 │   ├── components — Vue components.
 │   ├── config — application configuration and configuration utilities.
 │   ├── main.ts — application entry point.
-│   └── services — AI engine and related services.
+│   └── services — AI engine, worker, retriever, and related helpers.
 ├── tests — automated tests and test support files.
 │   ├── config — configuration utility tests.
 │   ├── mocks — mocks used by tests.
