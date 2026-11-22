@@ -41,6 +41,8 @@ export const isWebGpuAvailable = async (): Promise<boolean> => {
   }
 };
 
+const INITIALIZATION_CANCELLED_MESSAGE = "Model initialization was cancelled";
+
 const errorMessage = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
 
@@ -56,7 +58,7 @@ export const initializeModel = async (): Promise<void> => {
       throw new Error("WebGPU is unavailable or no compatible adapter was found.");
     }
     if (generation !== initGeneration) {
-      return;
+      throw new Error(INITIALIZATION_CANCELLED_MESSAGE);
     }
 
     await initEngine((progress, text) => {
@@ -86,7 +88,10 @@ export const initEngine = async (onProgress: (p: number, text: string) => void):
     const newWorker = new EngineWorker();
 
     initPromise = CreateWebWorkerMLCEngine(newWorker, MODEL_ID, {
-      initProgressCallback: (r) => onProgress(r.progress, r.text),
+      initProgressCallback: (r) => {
+        // A disposed engine must not overwrite the cancelled status with late progress events.
+        if (generation === initGeneration) onProgress(r.progress, r.text);
+      },
     })
       .then(async (created) => {
         if (generation !== initGeneration) {
@@ -107,6 +112,13 @@ export const initEngine = async (onProgress: (p: number, text: string) => void):
   return initPromise;
 };
 
+const recordExchange = (userMessage: string, assistantMessage: string): void => {
+  if (!assistantMessage) return;
+  history.push({ role: "user", content: userMessage });
+  history.push({ role: "assistant", content: assistantMessage });
+  history.splice(0, Math.max(0, history.length - MAX_HISTORY_MESSAGES));
+};
+
 export const sendMessage = async (
   userMessage: string,
   onToken: (t: string) => void,
@@ -123,7 +135,11 @@ export const sendMessage = async (
   let finishReason: string | null = null;
 
   try {
-    const extContext = await retrieve(userMessage);
+    const previousUserMessage = [...history].reverse().find((message) => message.role === "user");
+    const extContext = await retrieve(
+      userMessage,
+      typeof previousUserMessage?.content === "string" ? previousUserMessage.content : undefined
+    );
     if (abortRequested || generation !== initGeneration || engine !== currentEngine) {
       return { text: fullResponse, truncated: false, aborted: true };
     }
@@ -150,10 +166,8 @@ export const sendMessage = async (
       if (choice?.finish_reason) finishReason = choice.finish_reason;
     }
 
-    if (fullResponse && generation === initGeneration && engine === currentEngine) {
-      history.push({ role: "user", content: userMessage });
-      history.push({ role: "assistant", content: fullResponse });
-      history.splice(0, Math.max(0, history.length - MAX_HISTORY_MESSAGES));
+    if (generation === initGeneration && engine === currentEngine) {
+      recordExchange(userMessage, fullResponse);
     }
 
     return {
@@ -163,6 +177,10 @@ export const sendMessage = async (
     };
   } catch (error) {
     if (abortRequested || generation !== initGeneration || engine !== currentEngine) {
+      // Keep the partial reply the user saw so the model sees it in later turns.
+      if (abortRequested && generation === initGeneration && engine === currentEngine) {
+        recordExchange(userMessage, fullResponse);
+      }
       return { text: fullResponse, truncated: false, aborted: true };
     }
     throw error;
@@ -197,6 +215,9 @@ export const disposeEngine = async (): Promise<void> => {
   try {
     if (generating) currentEngine?.interruptGenerate();
     await currentEngine?.unload();
+  } catch (error) {
+    // Disposal is usually fire-and-forget, so report the failure here instead of rejecting.
+    console.error("[ai-widget] engine unload failed", error);
   } finally {
     currentWorker?.terminate();
   }

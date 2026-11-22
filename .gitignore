@@ -40,3 +40,7 @@ __screenshots__/
 
 .vscode
 .env
+
+# Local review notes
+REVIEW.md
+.agent-workflow

@@ -8,6 +8,7 @@ module.exports = {
     "^\\./aiEngine\\.worker\\?worker&inline$": "<rootDir>/tests/mocks/workerMock.ts",
   },
   transform: {
+    "^.+\\.vue$": "<rootDir>/tests/mocks/vueTransformer.cjs",
     "^.+\\.tsx?$": [
       "ts-jest",
       {

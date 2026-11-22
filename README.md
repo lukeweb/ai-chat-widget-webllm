@@ -21,7 +21,7 @@ Install the dependencies:
 yarn install
 ```
 
-Copy `.env.example` to `.env` in the project root. `.env` is gitignored, so create this file locally before running or building the app. Adjust the settings as needed.
+Optionally copy `.env.example` to `.env` in the project root (`.env` is gitignored) to override the defaults. Every setting has the default shown below, so the widget also works when `.env` is missing.
 
 ```dotenv
 VITE_MODEL_ID=Qwen2.5-1.5B-Instruct-q4f16_1-MLC
@@ -31,7 +31,7 @@ VITE_TEASER_VISIBLE_MS=10000
 VITE_WIDGET_TAG_NAME=ai-chat-widget
 ```
 
-These are public build-time settings, not secrets. Vite embeds them in the application bundle. Numeric settings must be positive integers.
+These are public build-time settings, not secrets. Vite embeds them in the application bundle. Numeric settings must be positive integers, and `VITE_WIDGET_TAG_NAME` must be a valid custom element name (lowercase, with a hyphen). A setting that is present but invalid fails at startup.
 
 ## Commands
 

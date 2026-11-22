@@ -1,16 +1,9 @@
-import { parsePositiveInteger } from "@/config/parsePositiveInteger";
+import { createAppConfig } from "@/config/createAppConfig";
 
-export const MODEL_ID = import.meta.env.VITE_MODEL_ID;
-export const MAX_HISTORY_MESSAGES = parsePositiveInteger(
-  "VITE_MAX_HISTORY_MESSAGES",
-  import.meta.env.VITE_MAX_HISTORY_MESSAGES
-);
-export const TEASER_DELAY_MS = parsePositiveInteger(
-  "VITE_TEASER_DELAY_MS",
-  import.meta.env.VITE_TEASER_DELAY_MS
-);
-export const TEASER_VISIBLE_MS = parsePositiveInteger(
-  "VITE_TEASER_VISIBLE_MS",
-  import.meta.env.VITE_TEASER_VISIBLE_MS
-);
-export const WIDGET_TAG_NAME = import.meta.env.VITE_WIDGET_TAG_NAME;
+const config = createAppConfig(import.meta.env);
+
+export const MODEL_ID = config.MODEL_ID;
+export const MAX_HISTORY_MESSAGES = config.MAX_HISTORY_MESSAGES;
+export const TEASER_DELAY_MS = config.TEASER_DELAY_MS;
+export const TEASER_VISIBLE_MS = config.TEASER_VISIBLE_MS;
+export const WIDGET_TAG_NAME = config.WIDGET_TAG_NAME;

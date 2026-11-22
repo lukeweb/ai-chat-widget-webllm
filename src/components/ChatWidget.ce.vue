@@ -1,13 +1,8 @@
 <script setup lang="ts">
 import { computed, ref, watch, nextTick, onBeforeUnmount } from "vue";
 import { TEASER_DELAY_MS, TEASER_VISIBLE_MS } from "@/config/appConfig";
-import {
-  initializeModel,
-  modelStatus,
-  sendMessage,
-  abort,
-  disposeEngine,
-} from "@/services/aiEngine";
+import { initializeModel, modelStatus, sendMessage, abort } from "@/services/aiEngine";
+import { createTeaserScheduler } from "@/services/teaser";
 
 type Msg = { role: "user" | "assistant"; text: string };
 
@@ -17,10 +12,18 @@ const input = ref("");
 const generating = ref(false);
 const listEl = ref<HTMLElement | null>(null);
 const inputEl = ref<HTMLTextAreaElement | null>(null);
+const launcherEl = ref<HTMLButtonElement | null>(null);
+const announcement = ref("");
 const messages = ref<Msg[]>([{ role: "assistant", text: "Hello! How can I help?" }]);
 
-let teaserShowTimer: number | undefined;
-let teaserHideTimer: number | undefined;
+const teaserScheduler = createTeaserScheduler({
+  delayMs: TEASER_DELAY_MS,
+  visibleMs: TEASER_VISIBLE_MS,
+  setVisible: (visible) => {
+    teaser.value = visible;
+  },
+  canShow: () => !open.value,
+});
 
 const modelStatusLabel = computed(() => {
   switch (modelStatus.value.state) {
@@ -42,6 +45,12 @@ const modelStatusLabel = computed(() => {
 });
 
 const sendNotice = ref("");
+const showStatusBar = computed(
+  () =>
+    modelStatus.value.state === "error" ||
+    modelStatus.value.state === "cancelled" ||
+    sendNotice.value !== ""
+);
 const retryInitialization = async () => {
   sendNotice.value = "";
   try {
@@ -55,25 +64,28 @@ watch(
   modelStatus,
   (status) => {
     if (status.state === "ready") sendNotice.value = "";
-    if (status.state === "ready" && teaserShowTimer === undefined) {
-      teaserShowTimer = window.setTimeout(() => {
-        teaser.value = true;
-        teaserHideTimer = window.setTimeout(() => {
-          teaser.value = false;
-        }, TEASER_VISIBLE_MS);
-      }, TEASER_DELAY_MS);
-    }
+    if (status.state === "ready") teaserScheduler.schedule();
   },
   { immediate: true }
 );
 
 const toggle = async () => {
   open.value = !open.value;
-  teaser.value = false;
-  if (open.value) {
-    await nextTick();
-    inputEl.value?.focus();
-  }
+  teaserScheduler.hide();
+  await nextTick();
+  if (open.value) inputEl.value?.focus();
+  else launcherEl.value?.focus();
+};
+
+const close = () => {
+  if (open.value) void toggle();
+};
+
+// Ignore Enter while an IME composition is being confirmed
+const onEnter = (event: KeyboardEvent) => {
+  if (event.isComposing || event.keyCode === 229) return;
+  event.preventDefault();
+  void send();
 };
 
 const send = async () => {
@@ -97,6 +109,7 @@ const send = async () => {
   if (!reply) return;
 
   generating.value = true;
+  announcement.value = "Assistant is typing";
   try {
     const result = await sendMessage(text, (token) => {
       reply.text += token;
@@ -104,12 +117,15 @@ const send = async () => {
     if (result.aborted) {
       const replyIndex = messages.value.indexOf(reply);
       if (!reply.text && replyIndex !== -1) messages.value.splice(replyIndex, 1);
+      announcement.value = "";
       return;
     }
     if (result.truncated) reply.text += " …";
     if (!reply.text) reply.text = "Failed to generate a response.";
+    announcement.value = reply.text;
   } catch {
     reply.text ||= "An error occurred while generating the response.";
+    announcement.value = reply.text;
   } finally {
     generating.value = false;
   }
@@ -124,10 +140,10 @@ watch(
   { deep: true, flush: "post" }
 );
 
+// The engine is a page-wide singleton: removing or moving the element must not unload the model.
 onBeforeUnmount(() => {
-  window.clearTimeout(teaserShowTimer);
-  window.clearTimeout(teaserHideTimer);
-  disposeEngine();
+  teaserScheduler.dispose();
+  abort();
 });
 </script>
 
@@ -139,7 +155,7 @@ onBeforeUnmount(() => {
         class="window"
         role="dialog"
         aria-label="Chat with the assistant"
-        @keydown.esc="open = false"
+        @keydown.esc="close"
       >
         <header class="header">
           <div class="avatar" aria-hidden="true">
@@ -160,16 +176,15 @@ onBeforeUnmount(() => {
           </button>
         </header>
 
-        <div class="model-status" role="status" aria-live="polite">
-          <span v-if="modelStatus.state === 'error'">{{ modelStatus.message }}</span>
-          <span v-else-if="sendNotice">{{ sendNotice }}</span>
-          <span v-else-if="modelStatus.state === 'preparing'">
-            Preparing model ({{ Math.floor(modelStatus.progress * 100) }}%)…
+        <!-- Progress is shown in the header; this bar only carries notices and recovery actions. -->
+        <div v-if="showStatusBar" class="model-status" role="status" aria-live="polite">
+          <span v-if="modelStatus.state === 'error'">
+            The model could not be loaded. Check that your browser supports WebGPU, then retry.
           </span>
-          <span v-else-if="modelStatus.state === 'initializing'">Preparing the model…</span>
-          <span v-else-if="modelStatus.state === 'cancelled'">Model initialization was cancelled.</span>
-          <span v-else-if="modelStatus.state === 'idle'">Model has not started loading.</span>
-          <span v-else>Model is ready.</span>
+          <span v-else-if="modelStatus.state === 'cancelled'">
+            Model loading was interrupted.
+          </span>
+          <span v-else-if="sendNotice">{{ sendNotice }}</span>
           <button
             v-if="modelStatus.state === 'error' || modelStatus.state === 'cancelled'"
             type="button"
@@ -180,7 +195,7 @@ onBeforeUnmount(() => {
           </button>
         </div>
 
-        <div ref="listEl" class="messages" aria-live="polite">
+        <div ref="listEl" class="messages" role="log" aria-live="off">
           <div v-for="(m, i) in messages" :key="i" class="row" :class="m.role">
             <div class="bubble">
               <span
@@ -202,7 +217,7 @@ onBeforeUnmount(() => {
             rows="1"
             placeholder="Type a message…"
             aria-label="Message"
-            @keydown.enter.exact.prevent="send"
+            @keydown.enter.exact="onEnter"
           ></textarea>
           <button
             v-if="generating"
@@ -234,13 +249,17 @@ onBeforeUnmount(() => {
         <button class="teaser-body" @click="toggle">
           Hello! Have a question? I'm happy to help.
         </button>
-        <button class="teaser-close" aria-label="Close tip" @click="teaser = false">
+        <button class="teaser-close" aria-label="Close tip" @click="teaserScheduler.hide()">
           <svg class="icon" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12" /></svg>
         </button>
       </div>
     </Transition>
 
+    <!-- Announces generation start and the finished reply instead of every streamed token -->
+    <div class="sr-only" role="status" aria-live="polite">{{ announcement }}</div>
+
     <button
+      ref="launcherEl"
       class="launcher"
       :aria-label="open ? 'Close chat' : 'Open chat'"
       :aria-expanded="open"
@@ -481,6 +500,16 @@ button {
   color: var(--muted);
   font-size: 12px;
   text-align: center;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
 }
 
 .model-status:has(.retry) {

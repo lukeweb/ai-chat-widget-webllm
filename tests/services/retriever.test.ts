@@ -1,10 +1,12 @@
-import { describe, expect, it } from "@jest/globals";
+import { afterEach, describe, expect, it } from "@jest/globals";
 import {
   KNOWLEDGE_BASE,
   KNOWLEDGE_BASE_PL,
   type KnowledgeBase,
 } from "../../src/config/knowledgeBase";
+import { stemEnglish } from "../../src/services/retriever.helpers";
 import {
+  detectLanguage,
   retrieve,
   scoreDocument,
   scoreDocuments,
@@ -24,7 +26,8 @@ const normalize = (value: string): string =>
     .toLowerCase()
     .replace(/ł/g, "l");
 
-const tokenizeForTest = (value: string): string[] => normalize(value).match(/[a-z0-9]+/g) ?? [];
+const tokenizeForTest = (value: string): string[] =>
+  (normalize(value).match(/[a-z0-9]+/g) ?? []).map(stemEnglish);
 
 const makeIndexedDocument = (document: KnowledgeBase) => ({
   document,
@@ -74,8 +77,9 @@ describe("scoreDocuments", () => {
   it("returns at most three relevant documents and excludes zero-score entries", () => {
     const documents = [
       makeDocument("Irrelevant", "Nothing related"),
-      makeDocument("Content match", "repair"),
       makeDocument("Keyword match", "Other", ["repair"]),
+      makeDocument("Second keyword match", "Other", ["repair"]),
+      makeDocument("Third keyword match", "Other", ["repair"]),
       makeDocument("Repair", "Other"),
     ];
 
@@ -85,7 +89,33 @@ describe("scoreDocuments", () => {
       scoreDocuments(indexedDocuments, ["repair"]).map(
         ({ document }: SearchResult) => document.title
       )
-    ).toEqual(["Repair", "Keyword match", "Content match"]);
+    ).toEqual(["Repair", "Keyword match", "Second keyword match"]);
+  });
+
+  it("ignores documents that only match through a single content word", () => {
+    const documents = [
+      makeDocument("Drop off", "Bring it in", ["bike"]),
+      makeDocument("Pricing", "Bike inspection costs 49 USD"),
+    ];
+    const indexedDocuments = documents.map(makeIndexedDocument);
+
+    expect(
+      scoreDocuments(indexedDocuments, ["bike"]).map(({ document }: SearchResult) => document.title)
+    ).toEqual(["Drop off"]);
+  });
+
+  it("drops documents scoring far below the best match even when above the minimum score", () => {
+    const documents = [
+      makeDocument("Repair", "Other", ["repair"]), // title 3 + keyword 2 = 5
+      makeDocument("Weak", "Other", ["repair"]), // keyword 2: above the minimum, below half of 5
+    ];
+    const indexedDocuments = documents.map(makeIndexedDocument);
+
+    expect(
+      scoreDocuments(indexedDocuments, ["repair"]).map(
+        ({ document }: SearchResult) => document.title
+      )
+    ).toEqual(["Repair"]);
   });
 
   it("returns an empty list when no documents match", () => {
@@ -158,4 +188,78 @@ describe("retrieve", () => {
       await expect(retrieve(query)).resolves.toBe("");
     }
   );
+});
+
+describe("retrieve follow-ups", () => {
+  it("falls back to the previous user message when the question has no context of its own", async () => {
+    expect(await retrieve("Can you tell me more about that?")).toBe("");
+
+    const result = await retrieve("Can you tell me more about that?", "What are your opening hours?");
+
+    expect(result).toContain("Opening Hours");
+  });
+
+  it("does not use the previous message when the question already matches", async () => {
+    const result = await retrieve("Do you accept cash?", "What are your opening hours?");
+
+    expect(result).toContain("Payment Methods");
+    expect(result).not.toContain("Opening Hours");
+  });
+});
+
+describe("detectLanguage", () => {
+  afterEach(() => {
+    delete (globalThis as { document?: unknown }).document;
+  });
+
+  it("detects Polish by diacritics even for very short input", () => {
+    expect(detectLanguage("cześć")).toBe("pl");
+  });
+
+  it("detects clear English and Polish sentences", () => {
+    expect(detectLanguage("how much does a brake adjustment cost")).toBe("en");
+    expect(detectLanguage("ile kosztuje regulacja hamulców")).toBe("pl");
+  });
+
+  it("falls back to the page language for undetectable input", () => {
+    Object.defineProperty(globalThis, "document", {
+      value: { documentElement: { lang: "pl-PL" } },
+      configurable: true,
+    });
+
+    expect(detectLanguage("hi")).toBe("pl");
+  });
+
+  it("defaults to English without a page language", () => {
+    expect(detectLanguage("hi")).toBe("en");
+    expect(detectLanguage("   ")).toBe("en");
+  });
+});
+
+describe("English plural handling", () => {
+  it.each([
+    ["Do you adjust brakes?", "Pricing"],
+    ["How many days does a service take?", "Repair Turnaround Time"],
+  ])("matches singular and plural forms: %s", async (question, title) => {
+    expect(await retrieve(question)).toContain(title);
+  });
+
+  it.each([
+    ["brakes", "brake"],
+    ["days", "day"],
+    ["batteries", "battery"],
+    ["watches", "watch"],
+    ["glass", "glass"],
+    ["bus", "bus"],
+    ["is", "is"],
+  ])("stems %s to %s", (word, stem) => {
+    expect(stemEnglish(word)).toBe(stem);
+  });
+});
+
+describe("Polish term groups", () => {
+  it("matches inflected Polish price and warranty questions", async () => {
+    expect(await retrieve("Jakie są ceny napraw?")).toContain("Cennik");
+    expect(await retrieve("Czy jest gwarancja na naprawy?")).toContain("Gwarancja");
+  });
 });

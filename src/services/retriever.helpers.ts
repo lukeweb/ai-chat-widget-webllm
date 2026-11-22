@@ -32,6 +32,12 @@ export const POLISH_TERM_GROUPS: Record<string, string[]> = {
     "działają",
     "funkcjonuje",
   ],
+  price: ["cena", "ceny", "cenie", "cenę", "cenach", "cennik", "cennika", "cenniku"],
+  repair: ["naprawa", "naprawy", "naprawie", "naprawę", "naprawić", "naprawiacie", "naprawiać"],
+  bike: ["rower", "roweru", "rowerze", "rowerem", "rowery", "rowerów", "rowerami"],
+  warranty: ["gwarancja", "gwarancji", "gwarancję", "gwarancją", "gwarancyjny"],
+  payment: ["płatność", "płatności", "płatnością", "płacić", "zapłacić", "zapłata", "zapłaty"],
+  cancel: ["anulować", "anulowanie", "anulowania", "anulacja", "odwołać", "odwołanie"],
   workshop: [
     "warsztat",
     "warsztatu",
@@ -96,3 +102,12 @@ export const ENGLISH_STOP_WORDS = new Set([
   "you",
   "your",
 ]);
+
+/** Minimal English plural folding so that "brakes" matches "brake" and "days" matches "day". */
+export const stemEnglish = (token: string): string => {
+  if (token.length <= 3 || !/^[a-z]+$/.test(token)) return token;
+  if (token.endsWith("ies")) return `${token.slice(0, -3)}y`;
+  if (/(?:sses|shes|ches|xes)$/.test(token)) return token.slice(0, -2);
+  if (token.endsWith("s") && !/(?:ss|us|is)$/.test(token)) return token.slice(0, -1);
+  return token;
+};

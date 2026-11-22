@@ -49,7 +49,7 @@ const stream = async function* (...chunks: Chunk[]): AsyncGenerator<Chunk> {
 describe("aiEngine", () => {
   let api: typeof import("../../src/services/aiEngine");
   let createEngine: jest.Mock<EngineCreator>;
-  let retrieveMock: jest.Mock<(content: string) => Promise<string>>;
+  let retrieveMock: jest.Mock<(content: string, previousContent?: string) => Promise<string>>;
   let MockWorker: typeof import("../mocks/workerMock").default;
 
   beforeEach(() => {
@@ -60,7 +60,7 @@ describe("aiEngine", () => {
     };
     createEngine = webLlmMock.CreateWebWorkerMLCEngine;
     retrieveMock = (jest.requireMock("../../src/services/retriever") as {
-      retrieve: jest.Mock<(content: string) => Promise<string>>;
+      retrieve: jest.Mock<(content: string, previousContent?: string) => Promise<string>>;
     }).retrieve;
     retrieveMock.mockResolvedValue("retrieved context");
     MockWorker = jest.requireActual<typeof import("../mocks/workerMock")>(
@@ -266,6 +266,51 @@ describe("aiEngine", () => {
     });
   });
 
+  describe("disposal during initialization", () => {
+    it("rejects initializeModel instead of resolving when disposed before the engine starts", async () => {
+      let resolveAdapter!: (adapter: unknown) => void;
+      mockAvailableWebGpu(
+        jest.fn<() => Promise<unknown>>().mockReturnValue(
+          new Promise((resolve) => {
+            resolveAdapter = resolve;
+          })
+        )
+      );
+
+      const init = api.initializeModel();
+      const disposed = api.disposeEngine();
+      resolveAdapter({});
+
+      await disposed;
+      await expect(init).rejects.toThrow("Model initialization was cancelled");
+      expect(createEngine).not.toHaveBeenCalled();
+      expect(api.modelStatus.value).toEqual({ state: "cancelled" });
+    });
+
+    it("ignores progress events that arrive after disposal", async () => {
+      mockAvailableWebGpu();
+      let progress!: (report: { progress: number; text: string }) => void;
+      let resolveCreation!: (engine: EngineStub) => void;
+      createEngine.mockImplementation((_worker, _modelId, options) => {
+        progress = options.initProgressCallback;
+        return new Promise<EngineStub>((resolve) => {
+          resolveCreation = resolve;
+        });
+      });
+
+      const init = api.initializeModel();
+      await Promise.resolve();
+      await Promise.resolve();
+      await api.disposeEngine();
+      progress({ progress: 0.5, text: "Fetching param cache" });
+      progress({ progress: 0.9, text: "Loading GPU shader modules" });
+      resolveCreation(makeEngine());
+
+      await expect(init).rejects.toThrow();
+      expect(api.modelStatus.value).toEqual({ state: "cancelled" });
+    });
+  });
+
   describe("sendMessage and conversation controls", () => {
     it("streams tokens, passes context, stores the exchange, and reports truncation", async () => {
       const engine = await initialize();
@@ -282,7 +327,7 @@ describe("aiEngine", () => {
         truncated: true,
       });
       expect(onToken.mock.calls).toEqual([["Hello"], [" there"]]);
-      expect(retrieveMock).toHaveBeenCalledWith("Hi");
+      expect(retrieveMock).toHaveBeenCalledWith("Hi", undefined);
       expect(engine.chat.completions.create.mock.calls[0]![0].messages).toEqual([
         { role: "system", content: SYSTEM_PROMPT },
         {
@@ -413,6 +458,58 @@ describe("aiEngine", () => {
       expect(engine.unload).toHaveBeenCalledTimes(1);
       expect(worker?.terminated).toBe(true);
       expect(api.abort).not.toThrow();
+    });
+
+    it("resolves disposal and still terminates the worker when unload fails", async () => {
+      const engine = await initialize();
+      engine.unload.mockRejectedValue(new Error("unload failed"));
+      const consoleError = jest.spyOn(console, "error").mockImplementation(() => undefined);
+      const worker = MockWorker.instances[0];
+
+      await expect(api.disposeEngine()).resolves.toBeUndefined();
+
+      expect(worker?.terminated).toBe(true);
+      expect(consoleError).toHaveBeenCalled();
+      consoleError.mockRestore();
+    });
+
+    it("passes the previous user message to retrieval for follow-up questions", async () => {
+      const engine = await initialize();
+      engine.chat.completions.create.mockImplementation(() =>
+        Promise.resolve(stream({ choices: [{ delta: { content: "Answer" }, finish_reason: "stop" }] }))
+      );
+
+      await api.sendMessage("What are your hours?", jest.fn());
+      await api.sendMessage("And on Sunday?", jest.fn());
+
+      expect(retrieveMock).toHaveBeenNthCalledWith(2, "And on Sunday?", "What are your hours?");
+    });
+
+    it("stores a partial reply in history when the user aborts and the stream throws", async () => {
+      const engine = await initialize();
+      engine.chat.completions.create.mockResolvedValue(
+        (async function* (): AsyncGenerator<Chunk> {
+          yield { choices: [{ delta: { content: "Partial" } }] };
+          api.abort();
+          throw new Error("interrupted");
+        })()
+      );
+
+      await expect(api.sendMessage("Question", jest.fn())).resolves.toMatchObject({
+        text: "Partial",
+        aborted: true,
+      });
+
+      engine.chat.completions.create.mockResolvedValue(
+        stream({ choices: [{ delta: { content: "Next" }, finish_reason: "stop" }] })
+      );
+      await api.sendMessage("Next question", jest.fn());
+      expect(engine.chat.completions.create.mock.calls[1]![0].messages).toEqual([
+        { role: "system", content: SYSTEM_PROMPT },
+        { role: "user", content: "Question" },
+        { role: "assistant", content: "Partial" },
+        { role: "user", content: expect.stringContaining("Next question") },
+      ]);
     });
   });
 });

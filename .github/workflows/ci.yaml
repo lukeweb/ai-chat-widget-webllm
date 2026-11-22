@@ -37,5 +37,8 @@ jobs:
       - name: Type-check tests
         run: yarn test:type-check
 
+      - name: Build without .env
+        run: yarn build
+
       - name: Run tests
         run: yarn test

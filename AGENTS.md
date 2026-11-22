@@ -15,7 +15,7 @@ A small project that adds a simple AI assistant to a website. The LLM runs direc
 ## Current state
 
 - Status: MVP — core functionality is implemented.
-- Implemented features: The chat UI mounts immediately; model initialization runs asynchronously through the AI engine service and Web Worker. The service exposes model status for the UI, including preparation progress when available, readiness, errors, and retry support. Messages can be drafted during initialization but are sent only when the model is ready. The LLM runs directly in the user's browser.
+- Implemented features: The chat UI mounts immediately; model initialization runs asynchronously through the AI engine service and Web Worker. The service exposes model status for the UI, including preparation progress when available, readiness, errors, and retry support. Messages can be drafted during initialization but are sent only when the model is ready. The engine is a page-wide singleton: removing or moving the widget element does not unload the model. Configuration has built-in defaults, so the widget works without a `.env` file. The LLM runs directly in the user's browser.
 - Known limitations: Browser and device compatibility may be limited and should be verified when developing or modifying features. Without WebGPU, the chat remains visible but generation is unavailable.
 
 ## Repository structure

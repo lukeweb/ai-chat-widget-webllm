@@ -1,10 +1,11 @@
 import { KNOWLEDGE_BASE, KNOWLEDGE_BASE_PL, type KnowledgeBase } from "@/config/knowledgeBase";
-import { detect } from "tinyld";
+import { detectAll } from "tinyld";
 import winkTokenizer from "wink-tokenizer";
 import {
   normalizeText,
   POLISH_CANONICAL_TERMS,
   POLISH_STOP_WORDS,
+  stemEnglish,
   ENGLISH_STOP_WORDS,
 } from "@/services/retriever.helpers";
 
@@ -26,15 +27,30 @@ export interface SearchResult {
   score: number;
 }
 
-export const retrieve = async (content: string): Promise<string> => {
-  const lang = detectLanguage(content);
-  const indexedDocuments = indexDocuments(lang);
+// A single weak match (one content word or a fuzzy match) is not enough to pull in a document.
+export const MIN_DOCUMENT_SCORE = 2;
+// Documents scoring far below the best match are mostly noise for a small model's context.
+export const MIN_RELATIVE_SCORE = 0.5;
 
+const search = (content: string): string => {
+  const lang = detectLanguage(content);
   const tokens = tokenize(content, lang);
 
-  return scoreDocuments(indexedDocuments, tokens)
+  return scoreDocuments(indexDocuments(lang), tokens)
     .map(({ document }: SearchResult) => `${document.title}\n${document.content}`)
     .join(`\n\n`);
+};
+
+/**
+ * Retrieves knowledge-base entries for a message. When the message alone matches nothing
+ * (for example a follow-up such as "And how much is that?"), the previous user message is
+ * added to the query.
+ */
+export const retrieve = async (content: string, previousContent?: string): Promise<string> => {
+  const result = search(content);
+  if (result || !previousContent) return result;
+
+  return search(`${previousContent}\n${content}`);
 };
 
 export const scoreDocuments = (documents: IndexedDocument[], tokens: string[]): SearchResult[] => {
@@ -44,10 +60,12 @@ export const scoreDocuments = (documents: IndexedDocument[], tokens: string[]): 
     results.push(scoreDocument(document, tokens));
   }
 
-  return results
-    .filter((result) => result.score > 0)
-    .sort((a, b: SearchResult) => b.score - a.score)
-    .slice(0, 3);
+  const ranked = results
+    .filter((result) => result.score >= MIN_DOCUMENT_SCORE)
+    .sort((a, b: SearchResult) => b.score - a.score);
+  const topScore = ranked[0]?.score ?? 0;
+
+  return ranked.filter((result) => result.score >= topScore * MIN_RELATIVE_SCORE).slice(0, 3);
 };
 
 export const scoreDocument = (indexed: IndexedDocument, tokens: string[]): SearchResult => {
@@ -91,10 +109,24 @@ const indexDocuments = (lang: string): IndexedDocument[] => {
   }));
 };
 
-const detectLanguage = (content: string): string => {
-  if (!content.trim()) return "en";
+const MIN_DETECTION_ACCURACY = 0.2;
+const SUPPORTED_LANGUAGES = ["en", "pl"];
+const POLISH_DIACRITICS = /[ąćęłńóśźż]/i;
 
-  return detect(content);
+const languageFromPage = (): string => {
+  const pageLanguage = typeof document === "undefined" ? "" : document.documentElement.lang;
+  return pageLanguage.toLowerCase().startsWith("pl") ? "pl" : "en";
+};
+
+export const detectLanguage = (content: string): string => {
+  if (!content.trim()) return "en";
+  if (POLISH_DIACRITICS.test(content)) return "pl";
+
+  // Restrict detection to the supported languages; very short queries are too ambiguous to trust.
+  const [best] = detectAll(content, { only: SUPPORTED_LANGUAGES });
+  if (!best || best.accuracy < MIN_DETECTION_ACCURACY) return languageFromPage();
+
+  return best.lang;
 };
 
 const tokenize = (
@@ -115,7 +147,7 @@ const tokenize = (
 };
 
 const canonicalizeToken = (token: string, lang: string): string =>
-  lang === "pl" ? (POLISH_CANONICAL_TERMS.get(token) ?? token) : token;
+  lang === "pl" ? (POLISH_CANONICAL_TERMS.get(token) ?? token) : stemEnglish(token);
 
 const hasNearToken = (candidates: Set<string> | undefined, query: string): boolean => {
   if (!candidates || query.length < 6) return false;
