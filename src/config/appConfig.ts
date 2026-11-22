@@ -7,3 +7,7 @@ export const MAX_HISTORY_MESSAGES = config.MAX_HISTORY_MESSAGES;
 export const TEASER_DELAY_MS = config.TEASER_DELAY_MS;
 export const TEASER_VISIBLE_MS = config.TEASER_VISIBLE_MS;
 export const WIDGET_TAG_NAME = config.WIDGET_TAG_NAME;
+export const MAX_OUTPUT_TOKENS = config.MAX_OUTPUT_TOKENS;
+export const MAX_INPUT_CHARS = config.MAX_INPUT_CHARS;
+export const MAX_HISTORY_CHARS = config.MAX_HISTORY_CHARS;
+export const MODEL_SIZE_HINT = config.MODEL_SIZE_HINT;

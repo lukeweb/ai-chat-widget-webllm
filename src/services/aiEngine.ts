@@ -6,7 +6,8 @@ import {
 } from "@mlc-ai/web-llm";
 import { readonly, shallowRef } from "vue";
 import { MAX_HISTORY_MESSAGES, MODEL_ID } from "@/config/appConfig";
-import { SYSTEM_PROMPT } from "@/config/systemPrompt";
+import { contentReady, getContent } from "@/services/content";
+import { buildSystemPrompt, buildUserMessage } from "@/services/prompt";
 import EngineWorker from "./aiEngine.worker?worker&inline";
 import { retrieve } from "./retriever";
 
@@ -15,6 +16,9 @@ let initPromise: Promise<void> | null = null;
 let worker: Worker | null = null;
 
 let generating = false;
+let settleWaiters: Array<() => void> = [];
+const mutableIsGenerating = shallowRef(false);
+export const isGenerating = readonly(mutableIsGenerating);
 let abortRequested = false;
 let initGeneration = 0;
 
@@ -121,20 +125,21 @@ const recordExchange = (userMessage: string, assistantMessage: string): void => 
 
 export const sendMessage = async (
   userMessage: string,
-  onToken: (t: string) => void,
-  context: string = ""
+  onToken: (t: string) => void
 ): Promise<{ text: string; truncated: boolean; aborted?: boolean }> => {
   const currentEngine = engine;
   if (!currentEngine) throw new Error("Engine not initialized");
   if (generating) throw new Error("Generation already in progress");
   const generation = initGeneration;
   generating = true;
+  mutableIsGenerating.value = true;
   abortRequested = false;
 
   let fullResponse = "";
   let finishReason: string | null = null;
 
   try {
+    await contentReady();
     const previousUserMessage = [...history].reverse().find((message) => message.role === "user");
     const extContext = await retrieve(
       userMessage,
@@ -144,12 +149,11 @@ export const sendMessage = async (
       return { text: fullResponse, truncated: false, aborted: true };
     }
 
-    const messageContext = context === "" ? extContext : `${context}\n${extContext}`;
     const stream: AsyncIterable<ChatCompletionChunk> = await currentEngine.chat.completions.create({
       messages: [
-        { role: "system", content: SYSTEM_PROMPT },
+        { role: "system", content: buildSystemPrompt(getContent()) },
         ...history,
-        { role: "user", content: `Context:\n${messageContext}\nQuestion:\n${userMessage}` },
+        { role: "user", content: buildUserMessage(extContext, userMessage) },
       ],
       stream: true,
       temperature: 0.2,
@@ -186,7 +190,11 @@ export const sendMessage = async (
     throw error;
   } finally {
     generating = false;
+    mutableIsGenerating.value = false;
     abortRequested = false;
+    const waiters = settleWaiters;
+    settleWaiters = [];
+    waiters.forEach((resolve) => resolve());
   }
 };
 
@@ -198,6 +206,16 @@ export const abort = (): void => {
 
 export const resetConversation = (): void => {
   if (generating) throw new Error("Cannot reset while generating");
+  history.length = 0;
+};
+
+/** Aborts any generation, waits for it to settle, then clears the conversation history. */
+export const startNewChat = async (): Promise<void> => {
+  if (generating) {
+    const settled = new Promise<void>((resolve) => settleWaiters.push(resolve));
+    abort();
+    await settled;
+  }
   history.length = 0;
 };
 
@@ -222,3 +240,7 @@ export const disposeEngine = async (): Promise<void> => {
     currentWorker?.terminate();
   }
 };
+
+/** Public lifecycle API: idempotent start and explicit destroy of the page-wide engine. */
+export const startEngine = initializeModel;
+export const destroyEngine = disposeEngine;

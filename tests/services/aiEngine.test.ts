@@ -77,6 +77,8 @@ describe("aiEngine", () => {
     delete (globalThis as { navigator?: Navigator }).navigator;
   });
 
+  const flushAsync = () => new Promise<void>((resolve) => setImmediate(resolve));
+
   const initialize = async (engine = makeEngine()) => {
     createEngine.mockResolvedValue(engine);
     await api.initEngine(jest.fn());
@@ -322,7 +324,7 @@ describe("aiEngine", () => {
       );
       const onToken = jest.fn<(token: string) => void>();
 
-      await expect(api.sendMessage("Hi", onToken, "extra context")).resolves.toEqual({
+      await expect(api.sendMessage("Hi", onToken)).resolves.toEqual({
         text: "Hello there",
         truncated: true,
       });
@@ -332,7 +334,7 @@ describe("aiEngine", () => {
         { role: "system", content: SYSTEM_PROMPT },
         {
           role: "user",
-          content: "Context:\nextra context\nretrieved context\nQuestion:\nHi",
+          content: "Context:\nretrieved context\nQuestion:\nHi",
         },
       ]);
 
@@ -366,6 +368,7 @@ describe("aiEngine", () => {
       );
 
       const firstSend = api.sendMessage("first", jest.fn<(token: string) => void>());
+      await flushAsync();
       await expect(api.sendMessage("second", jest.fn())).rejects.toThrow(
         "Generation already in progress"
       );
@@ -447,6 +450,88 @@ describe("aiEngine", () => {
 
       await expect(pendingSend).resolves.toMatchObject({ aborted: true });
       expect(engine.chat.completions.create).not.toHaveBeenCalled();
+    });
+
+    it("exposes isGenerating reactively for the duration of a send", async () => {
+      const engine = await initialize();
+      let release!: () => void;
+      engine.chat.completions.create.mockResolvedValue(
+        (async function* () {
+          await new Promise<void>((resolve) => {
+            release = resolve;
+          });
+          yield { choices: [{ delta: { content: "done" }, finish_reason: "stop" }] };
+        })()
+      );
+      expect(api.isGenerating.value).toBe(false);
+
+      const send = api.sendMessage("question", jest.fn());
+      await flushAsync();
+      expect(api.isGenerating.value).toBe(true);
+
+      release();
+      await send;
+      expect(api.isGenerating.value).toBe(false);
+    });
+
+    it("startNewChat aborts a running generation, waits for it to settle and clears history", async () => {
+      const engine = await initialize();
+      engine.chat.completions.create.mockResolvedValue(
+        stream({ choices: [{ delta: { content: "First" }, finish_reason: "stop" }] })
+      );
+      await api.sendMessage("kept?", jest.fn());
+
+      let release!: () => void;
+      engine.chat.completions.create.mockResolvedValue(
+        (async function* (): AsyncGenerator<Chunk> {
+          await new Promise<void>((resolve) => {
+            release = resolve;
+          });
+          yield { choices: [{ delta: { content: "late" } }] };
+        })()
+      );
+      const running = api.sendMessage("second", jest.fn());
+      await flushAsync();
+
+      let finished = false;
+      const newChat = api.startNewChat().then(() => {
+        finished = true;
+      });
+      await flushAsync();
+      expect(engine.interruptGenerate).toHaveBeenCalled();
+      expect(finished).toBe(false);
+
+      release();
+      await running;
+      await newChat;
+      expect(finished).toBe(true);
+      expect(api.isGenerating.value).toBe(false);
+
+      engine.chat.completions.create.mockResolvedValue(
+        stream({ choices: [{ delta: { content: "Fresh" }, finish_reason: "stop" }] })
+      );
+      await api.sendMessage("after reset", jest.fn());
+      const messages = engine.chat.completions.create.mock.calls.at(-1)![0].messages;
+      expect(messages.map((message) => message.role)).toEqual(["system", "user"]);
+    });
+
+    it("startNewChat clears history immediately when nothing is generating", async () => {
+      const engine = await initialize();
+      engine.chat.completions.create.mockResolvedValue(
+        stream({ choices: [{ delta: { content: "A" }, finish_reason: "stop" }] })
+      );
+      await api.sendMessage("one", jest.fn());
+
+      await api.startNewChat();
+      await api.sendMessage("two", jest.fn());
+
+      const messages = engine.chat.completions.create.mock.calls.at(-1)![0].messages;
+      expect(messages).toHaveLength(2);
+    });
+
+    it("exposes startEngine and destroyEngine as the lifecycle API", () => {
+      expect(api.startEngine).toBe(api.initializeModel);
+      expect(api.destroyEngine).toBe(api.disposeEngine);
     });
 
     it("unloads and terminates resources on disposal", async () => {
