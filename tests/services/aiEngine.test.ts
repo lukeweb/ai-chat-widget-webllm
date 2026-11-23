@@ -1,5 +1,4 @@
 import { describe, it, expect, afterEach, beforeEach, jest } from "@jest/globals";
-import { SYSTEM_PROMPT } from "../../src/config/systemPrompt";
 
 jest.mock("../../src/services/retriever", () => ({
   retrieve: jest.fn(),
@@ -22,6 +21,7 @@ type CompletionRequest = {
   messages: Array<{ role: string; content: string }>;
   stream: true;
   temperature: number;
+  max_tokens: number;
 };
 type CreateCompletion = (request: CompletionRequest) => Promise<AsyncIterable<Chunk>>;
 type EngineCreator = (
@@ -76,6 +76,8 @@ describe("aiEngine", () => {
     delete (globalThis as { window?: Window }).window;
     delete (globalThis as { navigator?: Navigator }).navigator;
   });
+
+  const flushAsync = () => new Promise<void>((resolve) => setImmediate(resolve));
 
   const initialize = async (engine = makeEngine()) => {
     createEngine.mockResolvedValue(engine);
@@ -250,8 +252,7 @@ describe("aiEngine", () => {
 
       const first = api.initializeModel();
       const second = api.initializeModel();
-      await Promise.resolve();
-      await Promise.resolve();
+      await flushAsync();
       expect(createEngine).toHaveBeenCalledTimes(1);
 
       const disposed = api.disposeEngine();
@@ -299,8 +300,7 @@ describe("aiEngine", () => {
       });
 
       const init = api.initializeModel();
-      await Promise.resolve();
-      await Promise.resolve();
+      await flushAsync();
       await api.disposeEngine();
       progress({ progress: 0.5, text: "Fetching param cache" });
       progress({ progress: 0.9, text: "Loading GPU shader modules" });
@@ -322,17 +322,17 @@ describe("aiEngine", () => {
       );
       const onToken = jest.fn<(token: string) => void>();
 
-      await expect(api.sendMessage("Hi", onToken, "extra context")).resolves.toEqual({
+      await expect(api.sendMessage("Hi", onToken)).resolves.toEqual({
         text: "Hello there",
         truncated: true,
       });
       expect(onToken.mock.calls).toEqual([["Hello"], [" there"]]);
       expect(retrieveMock).toHaveBeenCalledWith("Hi", undefined);
       expect(engine.chat.completions.create.mock.calls[0]![0].messages).toEqual([
-        { role: "system", content: SYSTEM_PROMPT },
+        { role: "system", content: expect.stringContaining("virtual assistant of Bluebird Bike Workshop") },
         {
           role: "user",
-          content: "Context:\nextra context\nretrieved context\nQuestion:\nHi",
+          content: "KNOWLEDGE BASE:\nretrieved context\n\nQUESTION:\nHi",
         },
       ]);
 
@@ -341,12 +341,12 @@ describe("aiEngine", () => {
       );
       await api.sendMessage("Follow up", jest.fn());
       expect(engine.chat.completions.create.mock.calls[1]![0].messages).toEqual([
-        { role: "system", content: SYSTEM_PROMPT },
+        { role: "system", content: expect.stringContaining("virtual assistant of Bluebird Bike Workshop") },
         { role: "user", content: "Hi" },
         { role: "assistant", content: "Hello there" },
         {
           role: "user",
-          content: "Context:\nretrieved context\nQuestion:\nFollow up",
+          content: "KNOWLEDGE BASE:\nretrieved context\n\nQUESTION:\nFollow up",
         },
       ]);
     });
@@ -366,6 +366,7 @@ describe("aiEngine", () => {
       );
 
       const firstSend = api.sendMessage("first", jest.fn<(token: string) => void>());
+      await flushAsync();
       await expect(api.sendMessage("second", jest.fn())).rejects.toThrow(
         "Generation already in progress"
       );
@@ -390,10 +391,10 @@ describe("aiEngine", () => {
       engine.chat.completions.create.mockResolvedValueOnce(stream({ choices: [{}] }));
       await api.sendMessage("after reset", jest.fn());
       expect(engine.chat.completions.create.mock.calls[2]![0].messages).toEqual([
-        { role: "system", content: SYSTEM_PROMPT },
+        { role: "system", content: expect.stringContaining("virtual assistant of Bluebird Bike Workshop") },
         {
           role: "user",
-          content: "Context:\nretrieved context\nQuestion:\nafter reset",
+          content: "KNOWLEDGE BASE:\nretrieved context\n\nQUESTION:\nafter reset",
         },
       ]);
     });
@@ -447,6 +448,183 @@ describe("aiEngine", () => {
 
       await expect(pendingSend).resolves.toMatchObject({ aborted: true });
       expect(engine.chat.completions.create).not.toHaveBeenCalled();
+    });
+
+    it("exposes isGenerating reactively for the duration of a send", async () => {
+      const engine = await initialize();
+      let release!: () => void;
+      engine.chat.completions.create.mockResolvedValue(
+        (async function* () {
+          await new Promise<void>((resolve) => {
+            release = resolve;
+          });
+          yield { choices: [{ delta: { content: "done" }, finish_reason: "stop" }] };
+        })()
+      );
+      expect(api.isGenerating.value).toBe(false);
+
+      const send = api.sendMessage("question", jest.fn());
+      await flushAsync();
+      expect(api.isGenerating.value).toBe(true);
+
+      release();
+      await send;
+      expect(api.isGenerating.value).toBe(false);
+    });
+
+    it("startNewChat aborts a running generation, waits for it to settle and clears history", async () => {
+      const engine = await initialize();
+      engine.chat.completions.create.mockResolvedValue(
+        stream({ choices: [{ delta: { content: "First" }, finish_reason: "stop" }] })
+      );
+      await api.sendMessage("kept?", jest.fn());
+
+      let release!: () => void;
+      engine.chat.completions.create.mockResolvedValue(
+        (async function* (): AsyncGenerator<Chunk> {
+          await new Promise<void>((resolve) => {
+            release = resolve;
+          });
+          yield { choices: [{ delta: { content: "late" } }] };
+        })()
+      );
+      const running = api.sendMessage("second", jest.fn());
+      await flushAsync();
+
+      let finished = false;
+      const newChat = api.startNewChat().then(() => {
+        finished = true;
+      });
+      await flushAsync();
+      expect(engine.interruptGenerate).toHaveBeenCalled();
+      expect(finished).toBe(false);
+
+      release();
+      await running;
+      await newChat;
+      expect(finished).toBe(true);
+      expect(api.isGenerating.value).toBe(false);
+
+      engine.chat.completions.create.mockResolvedValue(
+        stream({ choices: [{ delta: { content: "Fresh" }, finish_reason: "stop" }] })
+      );
+      await api.sendMessage("after reset", jest.fn());
+      const messages = engine.chat.completions.create.mock.calls.at(-1)![0].messages;
+      expect(messages.map((message) => message.role)).toEqual(["system", "user"]);
+    });
+
+    it("startNewChat clears history immediately when nothing is generating", async () => {
+      const engine = await initialize();
+      engine.chat.completions.create.mockResolvedValue(
+        stream({ choices: [{ delta: { content: "A" }, finish_reason: "stop" }] })
+      );
+      await api.sendMessage("one", jest.fn());
+
+      await api.startNewChat();
+      await api.sendMessage("two", jest.fn());
+
+      const messages = engine.chat.completions.create.mock.calls.at(-1)![0].messages;
+      expect(messages).toHaveLength(2);
+    });
+
+    it("exposes startEngine and destroyEngine as the lifecycle API", () => {
+      expect(api.startEngine).toBe(api.initializeModel);
+      expect(api.destroyEngine).toBe(api.disposeEngine);
+    });
+
+    it("limits the reply length with max_tokens", async () => {
+      const engine = await initialize();
+      engine.chat.completions.create.mockResolvedValue(
+        stream({ choices: [{ delta: { content: "ok" }, finish_reason: "stop" }] })
+      );
+
+      await api.sendMessage("Hi", jest.fn());
+
+      expect(engine.chat.completions.create.mock.calls[0]![0].max_tokens).toBe(512);
+    });
+
+    it("rejects over-long input with InputTooLongError before retrieval or generation", async () => {
+      const engine = await initialize();
+
+      const send = api.sendMessage("x".repeat(1001), jest.fn());
+
+      await expect(send).rejects.toBeInstanceOf(api.InputTooLongError);
+      await expect(send).rejects.toMatchObject({ name: "InputTooLongError", maxChars: 1000 });
+      expect(retrieveMock).not.toHaveBeenCalled();
+      expect(engine.chat.completions.create).not.toHaveBeenCalled();
+      expect(api.isGenerating.value).toBe(false);
+    });
+
+    it("accepts input of exactly the maximum length", async () => {
+      const engine = await initialize();
+      engine.chat.completions.create.mockResolvedValue(
+        stream({ choices: [{ delta: { content: "ok" }, finish_reason: "stop" }] })
+      );
+
+      await expect(api.sendMessage("x".repeat(1000), jest.fn())).resolves.toMatchObject({
+        text: "ok",
+      });
+    });
+
+    it("drops the oldest exchange when the history character budget is exceeded", async () => {
+      const engine = await initialize();
+      const reply = (text: string) =>
+        stream({ choices: [{ delta: { content: text }, finish_reason: "stop" }] });
+      engine.chat.completions.create.mockResolvedValueOnce(reply("a".repeat(4000)));
+      await api.sendMessage("first", jest.fn());
+      engine.chat.completions.create.mockResolvedValueOnce(reply("b".repeat(4000)));
+      await api.sendMessage("second", jest.fn());
+      engine.chat.completions.create.mockResolvedValueOnce(reply("done"));
+
+      await api.sendMessage("third", jest.fn());
+
+      const sent = engine.chat.completions.create.mock.calls[2]![0].messages;
+      expect(sent.map((message) => message.role)).toEqual(["system", "user", "assistant", "user"]);
+      expect(sent[1]!.content).toBe("second");
+    });
+
+    it("keeps history in whole user/assistant pairs when trimming by message count", async () => {
+      const engine = await initialize();
+      for (const text of ["one", "two", "three"]) {
+        engine.chat.completions.create.mockResolvedValueOnce(
+          stream({ choices: [{ delta: { content: `re-${text}` }, finish_reason: "stop" }] })
+        );
+        await api.sendMessage(text, jest.fn());
+      }
+      engine.chat.completions.create.mockResolvedValueOnce(
+        stream({ choices: [{ delta: { content: "x" }, finish_reason: "stop" }] })
+      );
+
+      await api.sendMessage("four", jest.fn());
+
+      const sent = engine.chat.completions.create.mock.calls[3]![0].messages;
+      expect(sent.slice(1, -1).map((message) => message.content)).toEqual([
+        "two",
+        "re-two",
+        "three",
+        "re-three",
+      ]);
+    });
+
+    it("maps a context window overflow to ContextOverflowError", async () => {
+      const engine = await initialize();
+      const overflow = new Error("Prompt tokens exceed context window size");
+      overflow.name = "ContextWindowSizeExceededError";
+      engine.chat.completions.create.mockRejectedValue(overflow);
+
+      const send = api.sendMessage("Hi", jest.fn());
+
+      await expect(send).rejects.toBeInstanceOf(api.ContextOverflowError);
+      await expect(send).rejects.toMatchObject({ name: "ContextOverflowError", cause: overflow });
+      expect(api.isGenerating.value).toBe(false);
+    });
+
+    it("rethrows other generation errors unchanged", async () => {
+      const engine = await initialize();
+      const failure = new Error("GPU lost");
+      engine.chat.completions.create.mockRejectedValue(failure);
+
+      await expect(api.sendMessage("Hi", jest.fn())).rejects.toBe(failure);
     });
 
     it("unloads and terminates resources on disposal", async () => {
@@ -505,7 +683,7 @@ describe("aiEngine", () => {
       );
       await api.sendMessage("Next question", jest.fn());
       expect(engine.chat.completions.create.mock.calls[1]![0].messages).toEqual([
-        { role: "system", content: SYSTEM_PROMPT },
+        { role: "system", content: expect.stringContaining("virtual assistant of Bluebird Bike Workshop") },
         { role: "user", content: "Question" },
         { role: "assistant", content: "Partial" },
         { role: "user", content: expect.stringContaining("Next question") },

@@ -15,7 +15,7 @@ A small project that adds a simple AI assistant to a website. The LLM runs direc
 ## Current state
 
 - Status: MVP — core functionality is implemented.
-- Implemented features: The chat UI mounts immediately; model initialization runs asynchronously through the AI engine service and Web Worker. The service exposes model status for the UI, including preparation progress when available, readiness, errors, and retry support. Messages can be drafted during initialization but are sent only when the model is ready. The engine is a page-wide singleton: removing or moving the widget element does not unload the model. Configuration has built-in defaults, so the widget works without a `.env` file. The LLM runs directly in the user's browser.
+- Implemented features: The chat UI mounts immediately; model initialization runs asynchronously through the AI engine service and Web Worker. The service exposes model status for the UI, including preparation progress when available, readiness, errors, and retry support. Messages can be drafted during initialization but are sent only when the model is ready. The model loads lazily, when the chat is first opened. The engine is a page-wide singleton with an explicit `startEngine()`/`destroyEngine()` API: removing or moving the widget element does not unload the model, and the element exposes `destroy()` for hosts. The system prompt and knowledge base can be loaded at runtime from a JSON file (`content-src`), with built-in defaults. The UI is available in English and Polish, has a "New chat" control, and input, output, and history sizes are limited through configuration. Configuration has built-in defaults, so the widget works without a `.env` file. The LLM runs directly in the user's browser.
 - Known limitations: Browser and device compatibility may be limited and should be verified when developing or modifying features. Without WebGPU, the chat remains visible but generation is unavailable.
 
 ## Repository structure
@@ -31,13 +31,18 @@ A small project that adds a simple AI assistant to a website. The LLM runs direc
 │   └── favicon.ico
 ├── src — application source code.
 │   ├── components — Vue components.
-│   ├── config — application configuration and configuration utilities.
+│   ├── config — application configuration (`createAppConfig` holds the testable logic) and utilities.
+│   ├── i18n — English and Polish UI messages and locale resolution.
 │   ├── main.ts — application entry point.
-│   └── services — AI engine, worker, retriever, and related helpers.
+│   ├── services — AI engine, worker, retriever, runtime content loader, prompt builder, teaser scheduler, and related helpers.
+│   └── widget — custom element wrapper (content source, destroy) and embed attribute helpers.
 ├── tests — automated tests and test support files.
-│   ├── config — configuration utility tests.
-│   ├── mocks — mocks used by tests.
-│   └── services — service tests.
+│   ├── components — component tests (jsdom and @vue/test-utils).
+│   ├── config — configuration tests.
+│   ├── i18n — i18n tests.
+│   ├── mocks — mocks and the Vue SFC Jest transformer used by tests.
+│   ├── services — service tests.
+│   └── widget — custom element wrapper and embed attribute tests.
 ├── tsconfig.app.json — application TypeScript configuration.
 ├── tsconfig.json — base TypeScript configuration.
 ├── tsconfig.node.json — TypeScript configuration for Node.js tooling.

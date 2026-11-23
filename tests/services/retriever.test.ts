@@ -1,10 +1,11 @@
-import { afterEach, describe, expect, it } from "@jest/globals";
+import { afterEach, describe, expect, it, jest } from "@jest/globals";
+import { loadContent } from "../../src/services/content";
 import {
   KNOWLEDGE_BASE,
   KNOWLEDGE_BASE_PL,
   type KnowledgeBase,
 } from "../../src/config/knowledgeBase";
-import { stemEnglish } from "../../src/services/retriever.helpers";
+import { GENERIC_TOKENS, stemEnglish, stemPolish } from "../../src/services/retriever.helpers";
 import {
   detectLanguage,
   retrieve,
@@ -80,7 +81,7 @@ describe("scoreDocuments", () => {
       makeDocument("Keyword match", "Other", ["repair"]),
       makeDocument("Second keyword match", "Other", ["repair"]),
       makeDocument("Third keyword match", "Other", ["repair"]),
-      makeDocument("Repair", "Other"),
+      makeDocument("Fourth keyword match", "Other", ["repair"]),
     ];
 
     const indexedDocuments = documents.map(makeIndexedDocument);
@@ -89,7 +90,7 @@ describe("scoreDocuments", () => {
       scoreDocuments(indexedDocuments, ["repair"]).map(
         ({ document }: SearchResult) => document.title
       )
-    ).toEqual(["Repair", "Keyword match", "Second keyword match"]);
+    ).toEqual(["Keyword match", "Second keyword match", "Third keyword match"]);
   });
 
   it("ignores documents that only match through a single content word", () => {
@@ -194,7 +195,10 @@ describe("retrieve follow-ups", () => {
   it("falls back to the previous user message when the question has no context of its own", async () => {
     expect(await retrieve("Can you tell me more about that?")).toBe("");
 
-    const result = await retrieve("Can you tell me more about that?", "What are your opening hours?");
+    const result = await retrieve(
+      "Can you tell me more about that?",
+      "What are your opening hours?"
+    );
 
     expect(result).toContain("Opening Hours");
   });
@@ -257,9 +261,209 @@ describe("English plural handling", () => {
   });
 });
 
+describe("stemPolish", () => {
+  it.each([
+    ["zajecia", "zajec"],
+    ["zajeciach", "zajec"],
+    ["trener", "tren"],
+    ["trenera", "tren"],
+    ["walka", "walk"],
+    ["walki", "walk"],
+    ["dorosly", "doros"],
+    ["doroslych", "doros"],
+    ["napraw", "napr"],
+  ])("cuts inflected word %s to a shared stem", (word, stem) => {
+    expect(stemPolish(word)).toBe(stem);
+  });
+
+  it.each([
+    ["godziny", "hour"],
+    ["cennik", "price"],
+    ["kosztuje", "price"],
+    ["treningow", "training"],
+    ["grupowych", "group"],
+    ["indywidualny", "personal"],
+    ["personalne", "personal"],
+    ["pakiety", "package"],
+    ["karnetow", "package"],
+    ["dzieci", "kid"],
+    ["dziecka", "kid"],
+    ["probny", "trial"],
+    ["grafik", "schedule"],
+    ["kosztorys", "estimate"],
+  ])("maps the domain form %s to the canonical term %s", (word, canonical) => {
+    expect(stemPolish(word)).toBe(canonical);
+  });
+
+  it("joins short stems that differ only by an ending", () => {
+    expect(stemPolish("grupa")).toBe(stemPolish("grupie"));
+    expect(stemPolish("karta")).toBe(stemPolish("karty"));
+  });
+
+  it("keeps short words and numbers unchanged", () => {
+    expect(stemPolish("dnia")).toBe("dnia");
+    expect(stemPolish("24")).toBe("24");
+  });
+
+  it("is idempotent, including for canonical names", () => {
+    for (const word of [
+      "godziny",
+      "cennik",
+      "treningow",
+      "kosztuje",
+      "warsztat",
+      "pakiety",
+      "walki",
+      "zajeciach",
+      "sztuki",
+      "24",
+      "9:00",
+    ]) {
+      const once = stemPolish(word);
+      expect(stemPolish(once)).toBe(once);
+    }
+  });
+});
+
+describe("query tokenization", () => {
+  it("matches canonical terms without stemming the query twice", async () => {
+    const result = await retrieve("Czy jest gwarancja na naprawy?");
+
+    expect(result).toContain("Gwarancja\n");
+  });
+
+  it("matches Polish inflections of words missing from the term groups", async () => {
+    const result = await retrieve("Ile kosztuje przeglad?");
+
+    expect(result).toContain("Cennik\n");
+  });
+
+  it("ignores generic tokens when scoring", () => {
+    const document = makeDocument("Training", "Training info", ["training"]);
+
+    expect(GENERIC_TOKENS.has("training")).toBe(true);
+    expect(scoreDocument(makeIndexedDocument(document), ["training"]).score).toBe(0);
+  });
+});
+
+describe("Polish query language detection", () => {
+  it.each([
+    "ile kosztuje przeglad",
+    "jakie sa godziny otwarcia",
+    "czy mozna zaplacic karta",
+    "chce umowic wizyte",
+  ])("detects Polish without diacritics: %s", (query) => {
+    expect(detectLanguage(query)).toBe("pl");
+  });
+
+  it.each([
+    "how much does a service cost",
+    "what are the training prices",
+    "do you offer group packages",
+  ])("does not mistake English for Polish: %s", (query) => {
+    expect(detectLanguage(query)).toBe("en");
+  });
+
+  it("retrieves from the Polish knowledge base for a question without diacritics", async () => {
+    const result = await retrieve("ile kosztuje przeglad roweru");
+
+    expect(result).toContain("Cennik\n");
+    expect(result).not.toContain("Pricing\n");
+  });
+});
+
+describe("relative score threshold", () => {
+  it("keeps documents scoring at least 70% of the best match and drops the rest", () => {
+    const documents = [
+      makeDocument("Repair", "Repair", ["repair"]), // title 3 + keyword 2 + content 1 = 6
+      makeDocument("Repair close", "Other", ["repair"]), // title 3 + keyword 2 = 5 (83%)
+      makeDocument("Repair far", "Other"), // title 3 only (50%)
+      makeDocument("Other", "Repair", ["repair"]), // keyword 2 + content 1 = 3 (50%)
+    ];
+
+    expect(
+      scoreDocuments(documents.map(makeIndexedDocument), ["repair"]).map(
+        ({ document }: SearchResult) => document.title
+      )
+    ).toEqual(["Repair", "Repair close"]);
+  });
+});
+
 describe("Polish term groups", () => {
   it("matches inflected Polish price and warranty questions", async () => {
     expect(await retrieve("Jakie są ceny napraw?")).toContain("Cennik");
     expect(await retrieve("Czy jest gwarancja na naprawy?")).toContain("Gwarancja");
+  });
+});
+
+describe("retrieve with the generated contact entry", () => {
+  it.each([
+    ["What is your phone number?", "Contact\nPhone: +1 555 0100."],
+    ["Jaki jest wasz numer telefonu?", "Kontakt\nPhone: +1 555 0100."],
+  ])("finds contact details for %j", async (question, expected) => {
+    expect(await retrieve(question)).toContain(expected);
+  });
+});
+
+describe("retrieve with loaded content", () => {
+  const entry = (title: string, content: string, keywords: string[]) => ({
+    title,
+    content,
+    keywords,
+  });
+  const mockFetch = (body: unknown) => {
+    globalThis.fetch = jest.fn(async () => ({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify(body),
+    })) as unknown as typeof fetch;
+  };
+  const originalFetch = globalThis.fetch;
+
+  afterEach(async () => {
+    globalThis.fetch = originalFetch;
+    await loadContent(undefined);
+  });
+
+  it("uses the knowledge base loaded through loadContent", async () => {
+    mockFetch({
+      systemPrompt: "Prompt {{contact}}",
+      contact: "Call 123",
+      knowledgeBase: { en: [entry("Tyres", "We sell tyres.", ["tyres", "tyre"])] },
+    });
+
+    await loadContent("/content.json");
+
+    expect(await retrieve("Do you sell tyres?")).toBe("Tyres\nWe sell tyres.");
+    expect(await retrieve("What are your opening hours?")).toBe("");
+    expect(await retrieve("What is your phone number?")).toContain("Contact\nCall 123");
+  });
+
+  it("falls back to the English knowledge base for Polish queries when no Polish one exists", async () => {
+    mockFetch({
+      systemPrompt: "Prompt",
+      contact: "Call 123",
+      knowledgeBase: { en: [entry("Godziny", "Open daily.", ["godziny"])] },
+    });
+
+    await loadContent("/content.json");
+
+    expect(await retrieve("godziny otwarcia")).toContain("Godziny\nOpen daily.");
+  });
+
+  it("prefers the Polish knowledge base for Polish queries when present", async () => {
+    mockFetch({
+      systemPrompt: "Prompt",
+      contact: "Call 123",
+      knowledgeBase: {
+        en: [entry("Hours", "English hours.", ["hours"])],
+        pl: [entry("Godziny", "Polskie godziny.", ["godziny"])],
+      },
+    });
+
+    await loadContent("/content.json");
+
+    expect(await retrieve("godziny otwarcia")).toBe("Godziny\nPolskie godziny.");
+    expect(await retrieve("What are the hours?")).toBe("Hours\nEnglish hours.");
   });
 });

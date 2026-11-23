@@ -7,6 +7,10 @@ export interface RawAppEnv {
   readonly VITE_TEASER_DELAY_MS?: string;
   readonly VITE_TEASER_VISIBLE_MS?: string;
   readonly VITE_WIDGET_TAG_NAME?: string;
+  readonly VITE_MAX_OUTPUT_TOKENS?: string;
+  readonly VITE_MAX_INPUT_CHARS?: string;
+  readonly VITE_MAX_HISTORY_CHARS?: string;
+  readonly VITE_MODEL_SIZE_HINT?: string;
 }
 
 export interface AppConfig {
@@ -15,6 +19,10 @@ export interface AppConfig {
   TEASER_DELAY_MS: number;
   TEASER_VISIBLE_MS: number;
   WIDGET_TAG_NAME: string;
+  MAX_OUTPUT_TOKENS: number;
+  MAX_INPUT_CHARS: number;
+  MAX_HISTORY_CHARS: number;
+  MODEL_SIZE_HINT: string;
 }
 
 // Defaults apply when a VITE_ variable is absent (for example when the gitignored .env is missing).
@@ -41,4 +49,8 @@ export const createAppConfig = (env: RawAppEnv): AppConfig => ({
     env.VITE_WIDGET_TAG_NAME,
     "ai-chat-widget"
   ),
+  MAX_OUTPUT_TOKENS: parsePositiveInteger("VITE_MAX_OUTPUT_TOKENS", env.VITE_MAX_OUTPUT_TOKENS, 512),
+  MAX_INPUT_CHARS: parsePositiveInteger("VITE_MAX_INPUT_CHARS", env.VITE_MAX_INPUT_CHARS, 1000),
+  MAX_HISTORY_CHARS: parsePositiveInteger("VITE_MAX_HISTORY_CHARS", env.VITE_MAX_HISTORY_CHARS, 6000),
+  MODEL_SIZE_HINT: parseNonEmptyString("VITE_MODEL_SIZE_HINT", env.VITE_MODEL_SIZE_HINT, "about 1 GB"),
 });

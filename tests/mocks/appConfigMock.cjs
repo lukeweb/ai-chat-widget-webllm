@@ -4,4 +4,8 @@ module.exports = {
   TEASER_DELAY_MS: 800,
   TEASER_VISIBLE_MS: 10000,
   WIDGET_TAG_NAME: "ai-chat-widget",
+  MAX_OUTPUT_TOKENS: 512,
+  MAX_INPUT_CHARS: 1000,
+  MAX_HISTORY_CHARS: 6000,
+  MODEL_SIZE_HINT: "about 1 GB",
 };

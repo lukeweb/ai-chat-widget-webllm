@@ -4,6 +4,9 @@ export interface KnowledgeBase {
   keywords: string[];
 }
 
+// Contact details are NOT part of the knowledge base: they live only in `Content.contact`, and a
+// "Contact" entry is generated from it at runtime. Authors must not repeat phone numbers, e-mail
+// addresses or other contact details in any entry (here or in loaded content files).
 export const KNOWLEDGE_BASE_PL: KnowledgeBase[] = [
   {
     title: "Godziny otwarcia",
@@ -16,11 +19,6 @@ export const KNOWLEDGE_BASE_PL: KnowledgeBase[] = [
     content:
       "Bluebird Bike Workshop znajduje się pod adresem 12 Maple Street, Springfield. Bezpłatny parking znajduje się za budynkiem.",
     keywords: ["adres", "lokalizacja", "dojazd", "parking", "samochód", "mapa"],
-  },
-  {
-    title: "Kontakt",
-    content: "Telefon: +1 555 0100. E-mail: hello@bluebird-bikes.example.",
-    keywords: ["kontakt", "telefon", "numer", "email", "e-mail", "adres mailowy"],
   },
   {
     title: "Cennik",
@@ -145,11 +143,6 @@ export const KNOWLEDGE_BASE: KnowledgeBase[] = [
     content:
       "Bluebird Bike Workshop is located at 12 Maple Street, Springfield. Free parking is available behind the building.",
     keywords: ["address", "location", "directions", "parking", "car", "map", "where", "find"],
-  },
-  {
-    title: "Contact Information",
-    content: "Phone: +1 555 0100. Email: hello@bluebird-bikes.example.",
-    keywords: ["contact", "phone", "telephone", "number", "email", "mail", "reach", "call"],
   },
   {
     title: "Pricing",

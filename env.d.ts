@@ -17,6 +17,10 @@ interface ImportMetaEnv {
   readonly VITE_TEASER_DELAY_MS?: string;
   readonly VITE_TEASER_VISIBLE_MS?: string;
   readonly VITE_WIDGET_TAG_NAME?: string;
+  readonly VITE_MAX_OUTPUT_TOKENS?: string;
+  readonly VITE_MAX_INPUT_CHARS?: string;
+  readonly VITE_MAX_HISTORY_CHARS?: string;
+  readonly VITE_MODEL_SIZE_HINT?: string;
 }
 
 interface ImportMeta {
