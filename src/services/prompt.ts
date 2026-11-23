@@ -1,8 +1,9 @@
 import type { Content } from "@/services/content";
 
-// CONTRACT STUB: sub-agent A replaces the implementation but keeps these exports and signatures.
+export const NO_KNOWLEDGE_PLACEHOLDER = "(no relevant information found)";
 
-export const buildSystemPrompt = (content: Content): string => content.systemPrompt;
+export const buildSystemPrompt = (content: Content): string =>
+  content.systemPrompt.split("{{contact}}").join(content.contact);
 
 export const buildUserMessage = (knowledge: string, question: string): string =>
-  `Context:\n${knowledge}\nQuestion:\n${question}`;
+  `KNOWLEDGE BASE:\n${knowledge || NO_KNOWLEDGE_PLACEHOLDER}\n\nQUESTION:\n${question}`;

@@ -1,20 +1,48 @@
 <script setup lang="ts">
-import { computed, ref, watch, nextTick, onBeforeUnmount } from "vue";
-import { TEASER_DELAY_MS, TEASER_VISIBLE_MS } from "@/config/appConfig";
-import { initializeModel, modelStatus, sendMessage, abort } from "@/services/aiEngine";
+import { computed, ref, watch, nextTick, onMounted, onBeforeUnmount } from "vue";
+import {
+  MAX_INPUT_CHARS,
+  MODEL_SIZE_HINT,
+  TEASER_DELAY_MS,
+  TEASER_VISIBLE_MS,
+} from "@/config/appConfig";
+import {
+  startEngine,
+  startNewChat,
+  isGenerating,
+  modelStatus,
+  sendMessage,
+  abort,
+} from "@/services/aiEngine";
 import { createTeaserScheduler } from "@/services/teaser";
+import { createTranslator, resolveLocale } from "@/i18n/messages";
+
+const props = defineProps<{ lang?: string }>();
 
 type Msg = { role: "user" | "assistant"; text: string };
 
 const open = ref(false);
 const teaser = ref(false);
 const input = ref("");
-const generating = ref(false);
 const listEl = ref<HTMLElement | null>(null);
 const inputEl = ref<HTMLTextAreaElement | null>(null);
 const launcherEl = ref<HTMLButtonElement | null>(null);
 const announcement = ref("");
-const messages = ref<Msg[]>([{ role: "assistant", text: "Hello! How can I help?" }]);
+
+const locale = computed(() =>
+  resolveLocale({
+    elementLang: props.lang,
+    htmlLang: document.documentElement.lang,
+    navigatorLanguage: navigator.language,
+  })
+);
+const t = computed(() => createTranslator(locale.value));
+
+const greeting = (): Msg => ({ role: "assistant", text: t.value("greeting") });
+const messages = ref<Msg[]>([greeting()]);
+// Incremented on every reset so that a send() started earlier can detect it is stale
+let conversationId = 0;
+const resetting = ref(false);
 
 const teaserScheduler = createTeaserScheduler({
   delayMs: TEASER_DELAY_MS,
@@ -28,19 +56,21 @@ const teaserScheduler = createTeaserScheduler({
 const modelStatusLabel = computed(() => {
   switch (modelStatus.value.state) {
     case "idle":
-      return "Model has not started loading";
+      return t.value("statusIdle", { size: MODEL_SIZE_HINT });
     case "preparing":
-      return `Preparing model: ${Math.floor(modelStatus.value.progress * 100)}%`;
+      return t.value("statusPreparing", {
+        percent: Math.floor(modelStatus.value.progress * 100),
+      });
     case "initializing":
-      return "Preparing the model…";
+      return t.value("statusInitializing");
     case "ready":
-      return "Ready to chat";
+      return t.value("statusReady");
     case "error":
-      return "Model failed to load";
+      return t.value("statusError");
     case "cancelled":
-      return "Model initialization was cancelled";
+      return t.value("statusCancelled");
     default:
-      return "Model status unavailable";
+      return t.value("statusUnknown");
   }
 });
 
@@ -54,7 +84,7 @@ const showStatusBar = computed(
 const retryInitialization = async () => {
   sendNotice.value = "";
   try {
-    await initializeModel();
+    await startEngine();
   } catch {
     // The manager retains the failure details in modelStatus and logs the original error.
   }
@@ -64,13 +94,22 @@ watch(
   modelStatus,
   (status) => {
     if (status.state === "ready") sendNotice.value = "";
-    if (status.state === "ready") teaserScheduler.schedule();
   },
   { immediate: true }
 );
 
+// The model stays idle until the chat is opened, so the teaser cannot wait for "ready".
+onMounted(() => teaserScheduler.schedule());
+
+let engineRequested = false;
+
 const toggle = async () => {
   open.value = !open.value;
+  if (open.value && !engineRequested) {
+    engineRequested = true;
+    // Failures are recorded in modelStatus by the service
+    startEngine().catch(() => {});
+  }
   teaserScheduler.hide();
   await nextTick();
   if (open.value) inputEl.value?.focus();
@@ -88,14 +127,42 @@ const onEnter = (event: KeyboardEvent) => {
   void send();
 };
 
+const sendErrorText = (error: unknown): string => {
+  switch (error instanceof Error ? error.name : "") {
+    case "InputTooLongError":
+      return t.value("errorMessageTooLong");
+    case "ContextOverflowError":
+      return t.value("errorConversationTooLong");
+    default:
+      return t.value("errorGeneric");
+  }
+};
+
+const newChat = async () => {
+  if (resetting.value) return;
+  resetting.value = true;
+  conversationId++;
+  try {
+    await startNewChat();
+  } catch {
+    // The visible conversation is reset regardless of service failures.
+  } finally {
+    messages.value = [greeting()];
+    sendNotice.value = "";
+    announcement.value = "";
+    input.value = "";
+    resetting.value = false;
+  }
+};
+
 const send = async () => {
   const text = input.value.trim();
-  if (!text || generating.value) return;
+  if (!text || isGenerating.value || resetting.value) return;
   if (modelStatus.value.state !== "ready") {
     sendNotice.value =
       modelStatus.value.state === "error"
-        ? "The model could not be loaded. Retry loading before sending your message."
-        : "The model is still preparing. Your message has not been sent.";
+        ? t.value("noticeModelError")
+        : t.value("noticeModelPreparing");
     return;
   }
   input.value = "";
@@ -108,12 +175,14 @@ const send = async () => {
 
   if (!reply) return;
 
-  generating.value = true;
-  announcement.value = "Assistant is typing";
+  const id = conversationId;
+  const isStale = () => id !== conversationId;
+  announcement.value = t.value("typing");
   try {
     const result = await sendMessage(text, (token) => {
-      reply.text += token;
+      if (!isStale()) reply.text += token;
     });
+    if (isStale()) return;
     if (result.aborted) {
       const replyIndex = messages.value.indexOf(reply);
       if (!reply.text && replyIndex !== -1) messages.value.splice(replyIndex, 1);
@@ -121,13 +190,12 @@ const send = async () => {
       return;
     }
     if (result.truncated) reply.text += " …";
-    if (!reply.text) reply.text = "Failed to generate a response.";
+    if (!reply.text) reply.text = t.value("errorEmptyResponse");
     announcement.value = reply.text;
-  } catch {
-    reply.text ||= "An error occurred while generating the response.";
+  } catch (error) {
+    if (isStale()) return;
+    reply.text ||= sendErrorText(error);
     announcement.value = reply.text;
-  } finally {
-    generating.value = false;
   }
 };
 
@@ -154,7 +222,7 @@ onBeforeUnmount(() => {
         v-show="open"
         class="window"
         role="dialog"
-        aria-label="Chat with the assistant"
+        :aria-label="t('dialogLabel')"
         @keydown.esc="close"
       >
         <header class="header">
@@ -166,12 +234,25 @@ onBeforeUnmount(() => {
             </svg>
           </div>
           <div class="title">
-            <strong>Assistant</strong>
+            <strong>{{ t("headerTitle") }}</strong>
             <span class="status" :class="`model-${modelStatus.state}`">
               <i class="dot"></i>{{ modelStatusLabel }}
             </span>
           </div>
-          <button class="icon-btn" aria-label="Close chat" @click="toggle">
+          <button
+            type="button"
+            class="icon-btn"
+            :aria-label="t('newChat')"
+            :title="t('newChat')"
+            :disabled="resetting"
+            @click="newChat"
+          >
+            <svg class="icon" viewBox="0 0 24 24">
+              <path d="M12 20h9" />
+              <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z" />
+            </svg>
+          </button>
+          <button class="icon-btn" :aria-label="t('closeChat')" @click="toggle">
             <svg class="icon" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12" /></svg>
           </button>
         </header>
@@ -179,10 +260,10 @@ onBeforeUnmount(() => {
         <!-- Progress is shown in the header; this bar only carries notices and recovery actions. -->
         <div v-if="showStatusBar" class="model-status" role="status" aria-live="polite">
           <span v-if="modelStatus.state === 'error'">
-            The model could not be loaded. Check that your browser supports WebGPU, then retry.
+            {{ t("barError") }}
           </span>
           <span v-else-if="modelStatus.state === 'cancelled'">
-            Model loading was interrupted.
+            {{ t("barCancelled") }}
           </span>
           <span v-else-if="sendNotice">{{ sendNotice }}</span>
           <button
@@ -191,7 +272,7 @@ onBeforeUnmount(() => {
             class="retry"
             @click="retryInitialization"
           >
-            Retry
+            {{ t("retry") }}
           </button>
         </div>
 
@@ -199,9 +280,9 @@ onBeforeUnmount(() => {
           <div v-for="(m, i) in messages" :key="i" class="row" :class="m.role">
             <div class="bubble">
               <span
-                v-if="m.text === '' && generating"
+                v-if="m.text === '' && isGenerating"
                 class="typing"
-                aria-label="Assistant is typing"
+                :aria-label="t('typing')"
               >
                 <i></i><i></i><i></i>
               </span>
@@ -215,22 +296,23 @@ onBeforeUnmount(() => {
             ref="inputEl"
             v-model="input"
             rows="1"
-            placeholder="Type a message…"
-            aria-label="Message"
+            :placeholder="t('placeholder')"
+            :aria-label="t('messageLabel')"
+            :maxlength="MAX_INPUT_CHARS"
             @keydown.enter.exact="onEnter"
           ></textarea>
           <button
-            v-if="generating"
+            v-if="isGenerating"
             type="button"
             class="send"
-            aria-label="Stop generation"
+            :aria-label="t('stop')"
             @click="abort()"
           >
             <svg class="icon icon-fill" viewBox="0 0 24 24">
               <rect x="6" y="6" width="12" height="12" rx="2" />
             </svg>
           </button>
-          <button v-else type="submit" class="send" aria-label="Send" :disabled="!input.trim()">
+          <button v-else type="submit" class="send" :aria-label="t('send')" :disabled="!input.trim()">
             <svg class="icon" viewBox="0 0 24 24">
               <path d="M22 2 11 13" />
               <path d="M22 2 15 22l-4-9-9-4 20-7z" />
@@ -239,7 +321,7 @@ onBeforeUnmount(() => {
         </form>
 
         <p class="disclaimer">
-          The AI assistant runs locally in your browser. Responses may be inaccurate.
+          {{ t("disclaimer") }}
         </p>
       </section>
     </Transition>
@@ -247,9 +329,9 @@ onBeforeUnmount(() => {
     <Transition name="pop">
       <div v-if="teaser && !open" class="teaser" role="status">
         <button class="teaser-body" @click="toggle">
-          Hello! Have a question? I'm happy to help.
+          {{ t("teaser") }}
         </button>
-        <button class="teaser-close" aria-label="Close tip" @click="teaserScheduler.hide()">
+        <button class="teaser-close" :aria-label="t('closeTip')" @click="teaserScheduler.hide()">
           <svg class="icon" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12" /></svg>
         </button>
       </div>
@@ -261,7 +343,7 @@ onBeforeUnmount(() => {
     <button
       ref="launcherEl"
       class="launcher"
-      :aria-label="open ? 'Close chat' : 'Open chat'"
+      :aria-label="open ? t('closeChat') : t('openChat')"
       :aria-expanded="open"
       @click="toggle"
     >

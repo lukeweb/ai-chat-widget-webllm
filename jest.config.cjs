@@ -5,7 +5,7 @@ module.exports = {
   moduleNameMapper: {
     "^@/config/appConfig$": "<rootDir>/tests/mocks/appConfigMock.cjs",
     "^@/(.*)$": "<rootDir>/src/$1",
-    "^\\./aiEngine\\.worker\\?worker&inline$": "<rootDir>/tests/mocks/workerMock.ts",
+    "^\\./aiEngine\\.worker\\?worker$": "<rootDir>/tests/mocks/workerMock.ts",
   },
   transform: {
     "^.+\\.vue$": "<rootDir>/tests/mocks/vueTransformer.cjs",
