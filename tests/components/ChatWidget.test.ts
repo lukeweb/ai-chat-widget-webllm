@@ -5,11 +5,14 @@ import { afterEach, beforeEach, describe, expect, it, jest } from "@jest/globals
 import { mount, type VueWrapper } from "@vue/test-utils";
 import { shallowRef } from "vue";
 import type { ModelStatus } from "../../src/services/aiEngine";
+import type { ModelTier, ModelTierPreference } from "../../src/services/modelTier";
 
 const status = shallowRef<ModelStatus>({ state: "ready" });
 const sendMessage = jest.fn<(text: string, onToken: (t: string) => void) => Promise<unknown>>();
 const abort = jest.fn();
-const startEngine = jest.fn<() => Promise<void>>();
+const startEngine = jest.fn<(options?: { tier?: ModelTierPreference }) => Promise<void>>();
+const modelTier = shallowRef<ModelTier | null>(null);
+const previewModelTier = jest.fn<(preference?: ModelTierPreference) => Promise<ModelTier>>();
 const startNewChat = jest.fn<() => Promise<void>>();
 const isGenerating = shallowRef(false);
 const disposeEngine = jest.fn();
@@ -20,7 +23,9 @@ jest.mock("../../src/services/aiEngine", () => ({
   sendMessage: (...args: [string, (t: string) => void]) => sendMessage(...args),
   abort: () => abort(),
   isGenerating,
-  startEngine: () => startEngine(),
+  startEngine: (options?: { tier?: ModelTierPreference }) => startEngine(options),
+  modelTier,
+  previewModelTier: (preference?: ModelTierPreference) => previewModelTier(preference),
   startNewChat: () => startNewChat(),
   disposeEngine: () => disposeEngine(),
   destroyEngine: () => destroyEngine(),
@@ -45,6 +50,8 @@ describe("ChatWidget", () => {
     sendMessage.mockReset();
     abort.mockReset();
     startEngine.mockReset().mockResolvedValue(undefined);
+    modelTier.value = null;
+    previewModelTier.mockReset().mockResolvedValue("full");
     startNewChat.mockReset().mockResolvedValue(undefined);
     isGenerating.value = false;
     disposeEngine.mockReset();
@@ -99,6 +106,51 @@ describe("ChatWidget", () => {
         "The model downloads when you open the chat (about 1 GB)"
       );
     });
+    it("passes the model-tier preference to the engine and its preview", async () => {
+      wrapper = mount(ChatWidget, { attachTo: document.body, props: { modelTier: "lite" } });
+      expect(previewModelTier).toHaveBeenCalledWith("lite");
+
+      await launcher().trigger("click");
+      expect(startEngine).toHaveBeenCalledWith({ tier: "lite" });
+    });
+
+    it("treats a missing or unknown model-tier as auto", async () => {
+      wrapper = mount(ChatWidget, { attachTo: document.body, props: { modelTier: "huge" } });
+      await launcher().trigger("click");
+
+      expect(previewModelTier).toHaveBeenCalledWith("auto");
+      expect(startEngine).toHaveBeenCalledWith({ tier: "auto" });
+    });
+
+    it("shows the lite download size when the device would get the lite model", async () => {
+      status.value = { state: "idle" };
+      previewModelTier.mockResolvedValue("lite");
+      mountWidget();
+      await jest.runAllTimersAsync();
+
+      expect(wrapper.get(".status").text()).toBe(
+        "The model downloads when you open the chat (about 400 MB)"
+      );
+    });
+
+    it("prefers the tier the engine actually chose over the preview", async () => {
+      status.value = { state: "idle" };
+      previewModelTier.mockResolvedValue("full");
+      modelTier.value = "lite";
+      mountWidget();
+      await jest.runAllTimersAsync();
+
+      expect(wrapper.get(".status").text()).toContain("about 400 MB");
+    });
+
+    it("keeps the full size hint when the preview fails", async () => {
+      status.value = { state: "idle" };
+      previewModelTier.mockRejectedValue(new Error("no signals"));
+      mountWidget();
+      await jest.runAllTimersAsync();
+
+      expect(wrapper.get(".status").text()).toContain("about 1 GB");
+    });
   });
 
   describe("teaser", () => {
@@ -141,7 +193,11 @@ describe("ChatWidget", () => {
   describe("status display", () => {
     it("shows a friendly message instead of the raw error and offers retry", async () => {
       mountWidget();
-      status.value = { state: "error", message: "TypeError: GPUAdapter is undefined at foo.js:1" };
+      status.value = {
+        state: "error",
+        message: "TypeError: GPUAdapter is undefined at foo.js:1",
+        reason: "unknown",
+      };
       await wrapper.vm.$nextTick();
 
       const bar = wrapper.get(".model-status");
@@ -150,6 +206,44 @@ describe("ChatWidget", () => {
 
       await bar.get(".retry").trigger("click");
       expect(startEngine).toHaveBeenCalledTimes(1);
+    });
+
+    it("shows the translated Polish reason-specific error and retry control", async () => {
+      status.value = { state: "error", message: "QuotaExceededError", reason: "storage-quota" };
+      wrapper = mount(ChatWidget, { attachTo: document.body, props: { lang: "pl" } });
+
+      const bar = wrapper.get(".model-status");
+      expect(bar.text()).toContain("brak miejsca na urządzeniu");
+      expect(bar.get(".retry").text()).toBe("Spróbuj ponownie");
+      expect(bar.text()).not.toContain("QuotaExceededError");
+    });
+
+    it("clears the error bar after Retry starts initialization", async () => {
+      status.value = { state: "error", message: "Failed to fetch", reason: "network" };
+      mountWidget();
+      expect(wrapper.find(".model-status").exists()).toBe(true);
+
+      await wrapper.get(".retry").trigger("click");
+      status.value = { state: "initializing" };
+      await wrapper.vm.$nextTick();
+
+      expect(wrapper.find(".model-status").exists()).toBe(false);
+    });
+
+    it.each([
+      ["webgpu-unavailable", "supports WebGPU"],
+      ["storage-quota", "not enough storage space"],
+      ["network", "download was interrupted"],
+      ["gpu-memory", "not have enough graphics memory"],
+      ["unknown", "Please retry"],
+    ] as const)("explains a %s failure in the status bar", async (reason, expected) => {
+      mountWidget();
+      status.value = { state: "error", message: "raw", reason };
+      await wrapper.vm.$nextTick();
+
+      const bar = wrapper.get(".model-status");
+      expect(bar.text()).toContain(expected);
+      expect(bar.find(".retry").exists()).toBe(true);
     });
 
     it("does not duplicate the header status in a status bar while loading or ready", async () => {

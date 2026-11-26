@@ -6,6 +6,8 @@ import { defineCustomElement, shallowRef } from "vue";
 
 jest.mock("../../src/services/aiEngine", () => ({
   modelStatus: shallowRef({ state: "idle" }),
+  modelTier: shallowRef(null),
+  previewModelTier: jest.fn(() => Promise.resolve("full")),
   isGenerating: shallowRef(false),
   sendMessage: jest.fn(),
   abort: jest.fn(),

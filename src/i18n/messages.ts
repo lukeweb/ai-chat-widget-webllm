@@ -20,7 +20,14 @@ const en = {
   statusError: "Model failed to load",
   statusCancelled: "Model initialization was cancelled",
   statusUnknown: "Model status unavailable",
-  barError: "The model could not be loaded. Check that your browser supports WebGPU, then retry.",
+  barErrorWebGpu:
+    "The model could not be loaded. Check that your browser supports WebGPU, then retry.",
+  barErrorStorage:
+    "The model could not be saved: not enough storage space. Free up space on the device or leave private browsing, then retry.",
+  barErrorNetwork:
+    "The model download was interrupted. Keep this page open and retry; downloaded parts are kept.",
+  barErrorGpuMemory: "This device does not have enough graphics memory to run the model.",
+  barErrorGeneric: "The model could not be loaded. Please retry.",
   barCancelled: "Model loading was interrupted.",
   retry: "Retry",
   noticeModelError: "The model could not be loaded. Retry loading before sending your message.",
@@ -55,8 +62,14 @@ const pl: Record<MessageKey, string> = {
   statusError: "Nie udało się wczytać modelu",
   statusCancelled: "Inicjalizacja modelu została anulowana",
   statusUnknown: "Stan modelu jest niedostępny",
-  barError:
+  barErrorWebGpu:
     "Nie udało się wczytać modelu. Sprawdź, czy Twoja przeglądarka obsługuje WebGPU, i spróbuj ponownie.",
+  barErrorStorage:
+    "Nie udało się zapisać modelu: brak miejsca na urządzeniu. Zwolnij miejsce lub wyłącz tryb prywatny, a potem spróbuj ponownie.",
+  barErrorNetwork:
+    "Pobieranie modelu zostało przerwane. Nie zamykaj tej strony i spróbuj ponownie; pobrane części zostaną zachowane.",
+  barErrorGpuMemory: "To urządzenie ma za mało pamięci graficznej, aby uruchomić model.",
+  barErrorGeneric: "Nie udało się wczytać modelu. Spróbuj ponownie.",
   barCancelled: "Wczytywanie modelu zostało przerwane.",
   retry: "Spróbuj ponownie",
   noticeModelError: "Nie udało się wczytać modelu. Ponów wczytywanie, zanim wyślesz wiadomość.",

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch, nextTick, onMounted, onBeforeUnmount } from "vue";
 import {
+  LITE_MODEL_SIZE_HINT,
   MAX_INPUT_CHARS,
   MODEL_SIZE_HINT,
   TEASER_DELAY_MS,
@@ -11,13 +12,24 @@ import {
   startNewChat,
   isGenerating,
   modelStatus,
+  modelTier as engineModelTier,
+  previewModelTier,
   sendMessage,
   abort,
 } from "@/services/aiEngine";
+import { parseModelTierPreference, type ModelTier } from "@/services/modelTier";
 import { createTeaserScheduler } from "@/services/teaser";
-import { createTranslator, resolveLocale } from "@/i18n/messages";
+import type { InitErrorReason } from "@/services/initError";
+import { createTranslator, resolveLocale, type MessageKey } from "@/i18n/messages";
 
-const props = defineProps<{ lang?: string }>();
+const props = defineProps<{ lang?: string; modelTier?: string }>();
+
+const tierPreference = computed(() => parseModelTierPreference(props.modelTier));
+// Until the engine starts, the expected tier decides which download size the idle hint shows.
+const expectedTier = ref<ModelTier>("full");
+const sizeHint = computed(() =>
+  (engineModelTier.value ?? expectedTier.value) === "lite" ? LITE_MODEL_SIZE_HINT : MODEL_SIZE_HINT
+);
 
 type Msg = { role: "user" | "assistant"; text: string };
 
@@ -56,7 +68,7 @@ const teaserScheduler = createTeaserScheduler({
 const modelStatusLabel = computed(() => {
   switch (modelStatus.value.state) {
     case "idle":
-      return t.value("statusIdle", { size: MODEL_SIZE_HINT });
+      return t.value("statusIdle", { size: sizeHint.value });
     case "preparing":
       return t.value("statusPreparing", {
         percent: Math.floor(modelStatus.value.progress * 100),
@@ -74,6 +86,17 @@ const modelStatusLabel = computed(() => {
   }
 });
 
+const ERROR_BAR_KEYS: Record<InitErrorReason, MessageKey> = {
+  "webgpu-unavailable": "barErrorWebGpu",
+  "storage-quota": "barErrorStorage",
+  network: "barErrorNetwork",
+  "gpu-memory": "barErrorGpuMemory",
+  unknown: "barErrorGeneric",
+};
+const errorBarText = computed(() =>
+  modelStatus.value.state === "error" ? t.value(ERROR_BAR_KEYS[modelStatus.value.reason]) : ""
+);
+
 const sendNotice = ref("");
 const showStatusBar = computed(
   () =>
@@ -84,7 +107,7 @@ const showStatusBar = computed(
 const retryInitialization = async () => {
   sendNotice.value = "";
   try {
-    await startEngine();
+    await startEngine({ tier: tierPreference.value });
   } catch {
     // The manager retains the failure details in modelStatus and logs the original error.
   }
@@ -99,7 +122,16 @@ watch(
 );
 
 // The model stays idle until the chat is opened, so the teaser cannot wait for "ready".
-onMounted(() => teaserScheduler.schedule());
+onMounted(() => {
+  teaserScheduler.schedule();
+  previewModelTier(tierPreference.value)
+    .then((tier) => {
+      expectedTier.value = tier;
+    })
+    .catch(() => {
+      // Device signals are optional; the full-size hint stays.
+    });
+});
 
 let engineRequested = false;
 
@@ -108,7 +140,7 @@ const toggle = async () => {
   if (open.value && !engineRequested) {
     engineRequested = true;
     // Failures are recorded in modelStatus by the service
-    startEngine().catch(() => {});
+    startEngine({ tier: tierPreference.value }).catch(() => {});
   }
   teaserScheduler.hide();
   await nextTick();
@@ -260,7 +292,7 @@ onBeforeUnmount(() => {
         <!-- Progress is shown in the header; this bar only carries notices and recovery actions. -->
         <div v-if="showStatusBar" class="model-status" role="status" aria-live="polite">
           <span v-if="modelStatus.state === 'error'">
-            {{ t("barError") }}
+            {{ errorBarText }}
           </span>
           <span v-else-if="modelStatus.state === 'cancelled'">
             {{ t("barCancelled") }}

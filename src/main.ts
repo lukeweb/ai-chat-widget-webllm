@@ -24,9 +24,10 @@ const mount = async () => {
 
   if (!document.querySelector(WIDGET_TAG_NAME)) {
     const element = document.createElement(WIDGET_TAG_NAME);
-    const { contentSrc, lang } = readEmbedAttributes(document);
+    const { contentSrc, lang, modelTier } = readEmbedAttributes(document);
     if (contentSrc) element.setAttribute("content-src", contentSrc);
     if (lang) element.setAttribute("lang", lang);
+    if (modelTier) element.setAttribute("model-tier", modelTier);
     document.body.appendChild(element);
   }
 };

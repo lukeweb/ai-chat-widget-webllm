@@ -13,6 +13,9 @@ describe("createAppConfig", () => {
       MAX_INPUT_CHARS: 1000,
       MAX_HISTORY_CHARS: 6000,
       MODEL_SIZE_HINT: "about 1 GB",
+      LITE_MODEL_ID: "Qwen3.5-0.8B-q4f16_1-MLC",
+      LITE_MODEL_SIZE_HINT: "about 400 MB",
+      LITE_CONTEXT_WINDOW: 2048,
     });
   });
 
@@ -28,6 +31,9 @@ describe("createAppConfig", () => {
         VITE_MAX_INPUT_CHARS: "200",
         VITE_MAX_HISTORY_CHARS: "3000",
         VITE_MODEL_SIZE_HINT: "2 GB",
+        VITE_LITE_MODEL_ID: "small-model",
+        VITE_LITE_MODEL_SIZE_HINT: "300 MB",
+        VITE_LITE_CONTEXT_WINDOW: "1024",
       })
     ).toEqual({
       MODEL_ID: "my-model",
@@ -39,6 +45,9 @@ describe("createAppConfig", () => {
       MAX_INPUT_CHARS: 200,
       MAX_HISTORY_CHARS: 3000,
       MODEL_SIZE_HINT: "2 GB",
+      LITE_MODEL_ID: "small-model",
+      LITE_MODEL_SIZE_HINT: "300 MB",
+      LITE_CONTEXT_WINDOW: 1024,
     });
   });
 
@@ -52,6 +61,9 @@ describe("createAppConfig", () => {
     [{ VITE_MAX_INPUT_CHARS: "x" }, "VITE_MAX_INPUT_CHARS"],
     [{ VITE_MAX_HISTORY_CHARS: "-1" }, "VITE_MAX_HISTORY_CHARS"],
     [{ VITE_MODEL_SIZE_HINT: " " }, "VITE_MODEL_SIZE_HINT"],
+    [{ VITE_LITE_MODEL_ID: " " }, "VITE_LITE_MODEL_ID"],
+    [{ VITE_LITE_MODEL_SIZE_HINT: "" }, "VITE_LITE_MODEL_SIZE_HINT"],
+    [{ VITE_LITE_CONTEXT_WINDOW: "0" }, "VITE_LITE_CONTEXT_WINDOW"],
   ])("fails loudly for an invalid value %j", (env, name) => {
     expect(() => createAppConfig(env)).toThrow(name);
   });

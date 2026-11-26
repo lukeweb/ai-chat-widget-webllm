@@ -33,9 +33,12 @@ VITE_MAX_OUTPUT_TOKENS=512
 VITE_MAX_INPUT_CHARS=1000
 VITE_MAX_HISTORY_CHARS=6000
 VITE_MODEL_SIZE_HINT=about 1 GB
+VITE_LITE_MODEL_ID=Qwen3.5-0.8B-q4f16_1-MLC
+VITE_LITE_MODEL_SIZE_HINT=about 400 MB
+VITE_LITE_CONTEXT_WINDOW=2048
 ```
 
-`VITE_MAX_OUTPUT_TOKENS` limits the length of a reply, `VITE_MAX_INPUT_CHARS` limits a user message (also enforced as the textarea `maxlength`), `VITE_MAX_HISTORY_CHARS` is the character budget for remembered conversation (oldest exchanges are dropped first), and `VITE_MODEL_SIZE_HINT` is the download size shown to visitors before the model loads.
+`VITE_MAX_OUTPUT_TOKENS` limits the length of a reply, `VITE_MAX_INPUT_CHARS` limits a user message (also enforced as the textarea `maxlength`), `VITE_MAX_HISTORY_CHARS` is the character budget for remembered conversation (oldest exchanges are dropped first), and `VITE_MODEL_SIZE_HINT` is the download size shown to visitors before the model loads. The `VITE_LITE_*` settings configure the smaller model used on mobile and low-resource devices (see "Model tiers" below); the lite model must be able to answer in Polish.
 
 These are public build-time settings, not secrets. Vite embeds them in the application bundle. Numeric settings must be positive integers, and `VITE_WIDGET_TAG_NAME` must be a valid custom element name (lowercase, with a hyphen). A setting that is present but invalid fails at startup.
 
@@ -89,6 +92,7 @@ Load the generated entry file as a module script, ideally marking it so the widg
 ```
 
 - `data-content-src` (or a `content-src` attribute on a pre-created `<ai-chat-widget>` element) points to a JSON file with the system prompt and knowledge base, so the widget can be reused without a rebuild. Changing the `content-src` attribute later reloads the content.
+- `data-model-tier` (or a `model-tier` attribute on the element) is `auto` (default), `lite` or `full`. It forces the model tier, for example `lite` to try the mobile setup on a desktop. The tier is chosen when the chat is first opened and stays for the page until `destroy()`.
 - `data-lang` (or a `lang` attribute on the element) selects the interface language (`en` or `pl`). Without it the widget uses `<html lang>`, then the browser language, then English.
 - The content file is `{ "systemPrompt": "... {{contact}} ...", "contact": "Phone: ...", "knowledgeBase": { "en": [{ "title", "content", "keywords": [] }], "pl": [...] } }`. `contact` is the single source of contact details: it is inserted into the prompt through `{{contact}}` and added to the knowledge base as a generated entry, so do not repeat contact details in other entries. If the file cannot be loaded or is invalid, the built-in defaults are used and a warning is logged. Content applies to the whole page (one model per page).
 - Hosts that want to unload the model call `document.querySelector("ai-chat-widget").destroy()`. Removing or moving the element never unloads the model.
@@ -117,6 +121,8 @@ Model status is displayed in the chat interface. The browser console also logs m
 
 - **Browser and device support:** Chat UI remains visible without WebGPU, but model initialization reports an error and generation is unavailable. Lower-powered compatible devices may generate responses slowly.
 - **Download and memory use:** The model is large (about 1 GB by default) and is downloaded only after the visitor opens the chat. The first load can take time and use significant bandwidth, storage, and GPU memory. Inference runs locally, but the model weights and WASM runtime are fetched from external hosts the first time. Test startup time and memory use on the devices your audience uses.
+- **Model tiers:** On a mobile device, or when the site has less than about 1.2 GB of storage left or the device reports 4 GB of memory or less, the widget loads the lite model (`VITE_LITE_MODEL_ID`, Qwen3.5-0.8B by default) with a 2048-token context. Desktops keep the full model and behave as before. The lite model gets a smaller task: one knowledge-base entry (two only when they match almost equally, at most 1,000 characters), short answer rules and an example in the answer language, temperature 0 and the last two exchanges of history. Its reply is not streamed: the widget checks that every number in it (prices, hours, dates written with digits) appears in the knowledge-base entry or the question, and shows the entry itself if one does not. Numbers written as words are not checked.
+- **Mobile devices:** Phones often have a small per-site storage quota and little GPU memory. The widget asks the browser to keep the downloaded model (`navigator.storage.persist()`) and, when loading fails, shows the likely cause: no WebGPU, not enough storage, an interrupted download, or not enough GPU memory. Downloaded parts are kept, so Retry resumes an interrupted download. To see the exact error on a phone, use remote debugging (Android: `chrome://inspect`; iOS: Safari Web Inspector). The `[ai-widget] model initialization failed` console line includes the failure reason and the site's storage usage and quota.
 - **Client-side configuration:** Vite embeds `VITE_` settings in the public bundle. The model configuration, system prompt, and any knowledge base included in the app can be inspected by users; do not put secrets or private data in them.
 - **No server-side controls:** Inference runs in the visitor's browser. Add a server-side service if production needs centralized access control, rate limiting, monitoring, or moderation.
 - **Model output:** Responses can be inaccurate or unsuitable for a particular use. Validate the model and user experience for your application before release.

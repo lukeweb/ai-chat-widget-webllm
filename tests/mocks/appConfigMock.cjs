@@ -8,4 +8,7 @@ module.exports = {
   MAX_INPUT_CHARS: 1000,
   MAX_HISTORY_CHARS: 6000,
   MODEL_SIZE_HINT: "about 1 GB",
+  LITE_MODEL_ID: "test-lite-model",
+  LITE_MODEL_SIZE_HINT: "about 400 MB",
+  LITE_CONTEXT_WINDOW: 2048,
 };

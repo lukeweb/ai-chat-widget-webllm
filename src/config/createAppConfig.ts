@@ -11,6 +11,9 @@ export interface RawAppEnv {
   readonly VITE_MAX_INPUT_CHARS?: string;
   readonly VITE_MAX_HISTORY_CHARS?: string;
   readonly VITE_MODEL_SIZE_HINT?: string;
+  readonly VITE_LITE_MODEL_ID?: string;
+  readonly VITE_LITE_MODEL_SIZE_HINT?: string;
+  readonly VITE_LITE_CONTEXT_WINDOW?: string;
 }
 
 export interface AppConfig {
@@ -23,6 +26,11 @@ export interface AppConfig {
   MAX_INPUT_CHARS: number;
   MAX_HISTORY_CHARS: number;
   MODEL_SIZE_HINT: string;
+  /** Smaller model used on mobile or low-resource devices; it must answer in Polish. */
+  LITE_MODEL_ID: string;
+  LITE_MODEL_SIZE_HINT: string;
+  /** Context window for the lite model, in tokens; a smaller window needs less GPU memory. */
+  LITE_CONTEXT_WINDOW: number;
 }
 
 // Defaults apply when a VITE_ variable is absent (for example when the gitignored .env is missing).
@@ -53,4 +61,19 @@ export const createAppConfig = (env: RawAppEnv): AppConfig => ({
   MAX_INPUT_CHARS: parsePositiveInteger("VITE_MAX_INPUT_CHARS", env.VITE_MAX_INPUT_CHARS, 1000),
   MAX_HISTORY_CHARS: parsePositiveInteger("VITE_MAX_HISTORY_CHARS", env.VITE_MAX_HISTORY_CHARS, 6000),
   MODEL_SIZE_HINT: parseNonEmptyString("VITE_MODEL_SIZE_HINT", env.VITE_MODEL_SIZE_HINT, "about 1 GB"),
+  LITE_MODEL_ID: parseNonEmptyString(
+    "VITE_LITE_MODEL_ID",
+    env.VITE_LITE_MODEL_ID,
+    "Qwen3.5-0.8B-q4f16_1-MLC"
+  ),
+  LITE_MODEL_SIZE_HINT: parseNonEmptyString(
+    "VITE_LITE_MODEL_SIZE_HINT",
+    env.VITE_LITE_MODEL_SIZE_HINT,
+    "about 400 MB"
+  ),
+  LITE_CONTEXT_WINDOW: parsePositiveInteger(
+    "VITE_LITE_CONTEXT_WINDOW",
+    env.VITE_LITE_CONTEXT_WINDOW,
+    2048
+  ),
 });

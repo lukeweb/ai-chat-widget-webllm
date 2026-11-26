@@ -2,6 +2,10 @@ import { describe, it, expect, afterEach, beforeEach, jest } from "@jest/globals
 
 jest.mock("../../src/services/retriever", () => ({
   retrieve: jest.fn(),
+  retrieveEntries: jest.fn(),
+  formatContext: jest.requireActual<typeof import("../../src/services/retriever")>(
+    "../../src/services/retriever"
+  ).formatContext,
 }));
 
 jest.mock("@mlc-ai/web-llm", () => ({
@@ -22,6 +26,7 @@ type CompletionRequest = {
   stream: true;
   temperature: number;
   max_tokens: number;
+  extra_body?: { enable_thinking: boolean };
 };
 type CreateCompletion = (request: CompletionRequest) => Promise<AsyncIterable<Chunk>>;
 type EngineCreator = (
@@ -29,7 +34,8 @@ type EngineCreator = (
   modelId: string,
   options: {
     initProgressCallback: (progress: { progress: number; text: string; timeElapsed?: number }) => void;
-  }
+  },
+  chatOptions?: { context_window_size?: number }
 ) => Promise<EngineStub>;
 
 const makeEngine = (): EngineStub => ({
@@ -174,6 +180,14 @@ describe("aiEngine", () => {
     });
   });
 
+  describe("requestPersistentStorage", () => {
+    it("does not throw when navigator.storage is absent", async () => {
+      Object.defineProperty(globalThis, "navigator", { value: {}, configurable: true });
+
+      await expect(api.requestPersistentStorage()).resolves.toBeUndefined();
+    });
+  });
+
   describe("model initialization status", () => {
     it("starts idle, reports preparation progress, then becomes ready", async () => {
       mockAvailableWebGpu();
@@ -219,7 +233,11 @@ describe("aiEngine", () => {
       createEngine.mockRejectedValueOnce(new Error("download failed"));
 
       await expect(api.initializeModel()).rejects.toThrow("download failed");
-      expect(api.modelStatus.value).toEqual({ state: "error", message: "download failed" });
+      expect(api.modelStatus.value).toEqual({
+        state: "error",
+        message: "download failed",
+        reason: "unknown",
+      });
 
       const engine = makeEngine();
       createEngine.mockResolvedValueOnce(engine);
@@ -238,7 +256,114 @@ describe("aiEngine", () => {
       expect(api.modelStatus.value).toEqual({
         state: "error",
         message: "WebGPU is unavailable or no compatible adapter was found.",
+        reason: "webgpu-unavailable",
       });
+    });
+
+    it("classifies a storage quota failure forwarded by the worker as a string", async () => {
+      mockAvailableWebGpu();
+      const consoleError = jest.spyOn(console, "error").mockImplementation(() => {});
+      createEngine.mockRejectedValueOnce("QuotaExceededError: Quota exceeded.");
+
+      await expect(api.initializeModel()).rejects.toBe("QuotaExceededError: Quota exceeded.");
+
+      expect(api.modelStatus.value).toEqual({
+        state: "error",
+        message: "QuotaExceededError: Quota exceeded.",
+        reason: "storage-quota",
+      });
+      expect(consoleError.mock.calls[0]![0]).toContain("storage-quota");
+      consoleError.mockRestore();
+    });
+
+    it("logs storage usage with the failure when the browser reports it", async () => {
+      mockAvailableWebGpu();
+      const estimate = jest
+        .fn<() => Promise<StorageEstimate>>()
+        .mockResolvedValue({ usage: 600 * 1048576, quota: 640 * 1048576 });
+      (navigator as unknown as { storage: Partial<StorageManager> }).storage = { estimate };
+      const consoleError = jest.spyOn(console, "error").mockImplementation(() => {});
+      createEngine.mockRejectedValueOnce("TypeError: Failed to fetch");
+
+      await expect(api.initializeModel()).rejects.toBe("TypeError: Failed to fetch");
+
+      expect(consoleError.mock.calls[0]![0]).toContain("network");
+      expect(consoleError.mock.calls[0]![0]).toContain("600 MB of 640 MB quota");
+      consoleError.mockRestore();
+    });
+
+    it.each([
+      ["no estimate API", {}, "storage estimate unavailable"],
+      [
+        "a rejected estimate",
+        { estimate: () => Promise.reject(new Error("unavailable")) },
+        "storage estimate unavailable",
+      ],
+      [
+        "a partial estimate",
+        { estimate: () => Promise.resolve({ usage: 1048576 }) },
+        "storage usage 1 MB of ? MB quota",
+      ],
+      ["an empty estimate", { estimate: () => Promise.resolve({}) }, "storage usage ? MB of ? MB quota"],
+    ] as const)("logs the failure safely with %s", async (_label, storage, expected) => {
+      mockAvailableWebGpu();
+      (navigator as unknown as { storage: Partial<StorageManager> }).storage = storage;
+      const consoleError = jest.spyOn(console, "error").mockImplementation(() => {});
+      createEngine.mockRejectedValueOnce("TypeError: Failed to fetch");
+
+      await expect(api.initializeModel()).rejects.toBe("TypeError: Failed to fetch");
+
+      expect(consoleError.mock.calls[0]![0]).toContain(expected);
+      consoleError.mockRestore();
+    });
+
+    it("requests persistent storage before downloading the model", async () => {
+      mockAvailableWebGpu();
+      const order: string[] = [];
+      const persist = jest.fn<() => Promise<boolean>>().mockImplementation(async () => {
+        order.push("persist");
+        return true;
+      });
+      (navigator as unknown as { storage: Partial<StorageManager> }).storage = { persist };
+      createEngine.mockImplementation(async () => {
+        order.push("create");
+        return makeEngine();
+      });
+
+      await api.initializeModel();
+
+      expect(order).toEqual(["persist", "create"]);
+      expect(api.modelStatus.value).toEqual({ state: "ready" });
+    });
+
+    it("still initializes when persistent storage is unsupported or refused", async () => {
+      mockAvailableWebGpu();
+      createEngine.mockResolvedValue(makeEngine());
+      await api.initializeModel();
+      expect(api.modelStatus.value).toEqual({ state: "ready" });
+
+      await api.disposeEngine();
+      const persist = jest.fn<() => Promise<boolean>>().mockRejectedValue(new Error("denied"));
+      (navigator as unknown as { storage: Partial<StorageManager> }).storage = { persist };
+      await api.initializeModel();
+
+      expect(persist).toHaveBeenCalledTimes(1);
+      expect(api.modelStatus.value).toEqual({ state: "ready" });
+    });
+
+    it("does not wait for a pending persistent storage request before downloading", async () => {
+      mockAvailableWebGpu();
+      // A permission prompt the visitor never answers
+      const persist = jest
+        .fn<() => Promise<boolean>>()
+        .mockReturnValue(new Promise<boolean>(() => {}));
+      (navigator as unknown as { storage: Partial<StorageManager> }).storage = { persist };
+      createEngine.mockResolvedValue(makeEngine());
+
+      await api.initializeModel();
+
+      expect(persist).toHaveBeenCalledTimes(1);
+      expect(api.modelStatus.value).toEqual({ state: "ready" });
     });
 
     it("shares concurrent initialization and marks disposal during load as cancelled", async () => {
@@ -268,6 +393,23 @@ describe("aiEngine", () => {
   });
 
   describe("disposal during initialization", () => {
+    it("does not replace cancelled status with a classified error from a late rejection", async () => {
+      mockAvailableWebGpu();
+      let rejectCreation!: (error: unknown) => void;
+      createEngine.mockReturnValue(new Promise<EngineStub>((_resolve, reject) => {
+        rejectCreation = reject;
+      }));
+
+      const initialization = api.initializeModel();
+      await flushAsync();
+      const disposed = api.disposeEngine();
+      rejectCreation("QuotaExceededError: Quota exceeded");
+      await disposed;
+
+      await expect(initialization).rejects.toBe("QuotaExceededError: Quota exceeded");
+      expect(api.modelStatus.value).toEqual({ state: "cancelled" });
+    });
+
     it("rejects initializeModel instead of resolving when disposed before the engine starts", async () => {
       let resolveAdapter!: (adapter: unknown) => void;
       mockAvailableWebGpu(
@@ -687,6 +829,353 @@ describe("aiEngine", () => {
         { role: "user", content: "Question" },
         { role: "assistant", content: "Partial" },
         { role: "user", content: expect.stringContaining("Next question") },
+      ]);
+    });
+  });
+
+  describe("lite tier", () => {
+    type RetrievedEntries = import("../../src/services/retriever").RetrievedEntries;
+    const priceEntry = {
+      document: { title: "Cennik", content: "Przegląd: 49 USD.", keywords: [] },
+      score: 5,
+    };
+    let retrieveEntriesMock: jest.Mock<(...args: unknown[]) => RetrievedEntries>;
+
+    beforeEach(() => {
+      retrieveEntriesMock = (jest.requireMock("../../src/services/retriever") as {
+        retrieveEntries: jest.Mock<(...args: unknown[]) => RetrievedEntries>;
+      }).retrieveEntries;
+      retrieveEntriesMock.mockReset().mockReturnValue({ language: "pl", results: [priceEntry] });
+    });
+
+    const initializeLite = async (engine = makeEngine()) => {
+      mockAvailableWebGpu();
+      createEngine.mockResolvedValue(engine);
+      await api.initializeModel({ tier: "lite" });
+      return engine;
+    };
+
+    it("loads the lite model with a smaller context window", async () => {
+      await initializeLite();
+
+      expect(createEngine.mock.calls[0]![1]).toBe("test-lite-model");
+      expect(createEngine.mock.calls[0]![3]).toEqual({ context_window_size: 2048 });
+      expect(api.modelTier.value).toBe("lite");
+    });
+
+    it("loads the full model without chat options on a desktop", async () => {
+      mockAvailableWebGpu();
+      createEngine.mockResolvedValue(makeEngine());
+      await api.initializeModel();
+
+      expect(createEngine.mock.calls[0]![1]).toBe("test-model");
+      expect(createEngine.mock.calls[0]).toHaveLength(3);
+      expect(api.modelTier.value).toBe("full");
+    });
+
+    it("chooses the lite tier automatically on a mobile device", async () => {
+      mockAvailableWebGpu();
+      (navigator as unknown as { userAgent: string }).userAgent =
+        "Mozilla/5.0 (Linux; Android 14; Pixel 8) Mobile Safari/537.36";
+      createEngine.mockResolvedValue(makeEngine());
+
+      expect(await api.previewModelTier()).toBe("lite");
+      await api.initializeModel();
+      expect(createEngine.mock.calls[0]![1]).toBe("test-lite-model");
+    });
+
+    it("uses one tier for overlapping first starts with different preferences", async () => {
+      mockAvailableWebGpu();
+      createEngine.mockResolvedValue(makeEngine());
+
+      const first = api.initializeModel({ tier: "lite" });
+      const second = api.initializeModel({ tier: "full" });
+      await Promise.all([first, second]);
+
+      expect(createEngine).toHaveBeenCalledTimes(1);
+      expect(createEngine.mock.calls[0]![1]).toBe("test-lite-model");
+      expect(api.modelTier.value).toBe("lite");
+    });
+
+    it("keeps the first tier until the engine is destroyed", async () => {
+      await initializeLite();
+      await api.initializeModel({ tier: "full" });
+
+      expect(createEngine).toHaveBeenCalledTimes(1);
+      expect(api.modelTier.value).toBe("lite");
+      expect(await api.previewModelTier("full")).toBe("lite");
+
+      await api.disposeEngine();
+      expect(api.modelTier.value).toBeNull();
+      createEngine.mockResolvedValue(makeEngine());
+      await api.initializeModel({ tier: "full" });
+      expect(createEngine.mock.calls[1]![1]).toBe("test-model");
+    });
+
+    it("sends a narrow Polish request and shows the checked answer in one piece", async () => {
+      const engine = await initializeLite();
+      engine.chat.completions.create.mockResolvedValue(
+        stream(
+          { choices: [{ delta: { content: "Przegląd kosztuje " } }] },
+          { choices: [{ delta: { content: "49 USD." }, finish_reason: "stop" }] }
+        )
+      );
+      const onToken = jest.fn<(token: string) => void>();
+
+      await expect(api.sendMessage("Ile kosztuje przegląd?", onToken)).resolves.toEqual({
+        text: "Przegląd kosztuje 49 USD.",
+        truncated: false,
+      });
+
+      expect(onToken.mock.calls).toEqual([["Przegląd kosztuje 49 USD."]]);
+      expect(retrieveEntriesMock).toHaveBeenCalledWith(
+        "Ile kosztuje przegląd?",
+        undefined,
+        expect.anything(),
+        { maxDocuments: 2, minSecondScoreRatio: 0.9 }
+      );
+      const request = engine.chat.completions.create.mock.calls[0]![0];
+      expect(request).toMatchObject({
+        temperature: 0,
+        max_tokens: 200,
+        extra_body: { enable_thinking: false },
+      });
+      expect(request.messages).toEqual([
+        { role: "system", content: expect.stringContaining("Odpowiadaj po polsku") },
+        // The worked example comes as chat turns before the history and the question.
+        { role: "user", content: expect.stringContaining("Do której jesteście otwarci w piątek?") },
+        { role: "assistant", content: "W piątek jesteśmy otwarci do 16:00." },
+        {
+          role: "user",
+          content:
+            "BAZA WIEDZY (KNOWLEDGE BASE):\nCennik\nPrzegląd: 49 USD.\n\nPYTANIE (QUESTION):\nIle kosztuje przegląd?",
+        },
+      ]);
+    });
+
+    it("replaces an answer with an unsupported number by the entry, also in history", async () => {
+      const engine = await initializeLite();
+      engine.chat.completions.create.mockResolvedValue(
+        // The wrong price is split across chunks.
+        stream(
+          { choices: [{ delta: { content: "Przegląd kosztuje 5" } }] },
+          { choices: [{ delta: { content: "9 USD." }, finish_reason: "stop" }] }
+        )
+      );
+      const onToken = jest.fn<(token: string) => void>();
+
+      await expect(api.sendMessage("Ile kosztuje przegląd?", onToken)).resolves.toEqual({
+        text: "Cennik: Przegląd: 49 USD.",
+        truncated: false,
+        factChecked: "replaced",
+      });
+      expect(onToken.mock.calls).toEqual([["Cennik: Przegląd: 49 USD."]]);
+
+      engine.chat.completions.create.mockResolvedValue(
+        stream({ choices: [{ delta: { content: "Tak." }, finish_reason: "stop" }] })
+      );
+      await api.sendMessage("A części?", jest.fn());
+      expect(engine.chat.completions.create.mock.calls[1]![0].messages.slice(3, 5)).toEqual([
+        { role: "user", content: "Ile kosztuje przegląd?" },
+        { role: "assistant", content: "Cennik: Przegląd: 49 USD." },
+      ]);
+    });
+
+    it("answers with the contact details when a number is unsupported and nothing matched", async () => {
+      retrieveEntriesMock.mockReturnValue({ language: "pl", results: [] });
+      const engine = await initializeLite();
+      engine.chat.completions.create.mockResolvedValue(
+        stream({ choices: [{ delta: { content: "Kosztuje 30 zł." }, finish_reason: "stop" }] })
+      );
+
+      const result = await api.sendMessage("Ile kosztuje mycie?", jest.fn());
+
+      expect(result.factChecked).toBe("replaced");
+      expect(result.text).toMatch(/^Nie mam tej informacji\. Skontaktuj się z nami: /);
+    });
+
+    it("removes a reasoning block before checking and showing the answer", async () => {
+      const engine = await initializeLite();
+      engine.chat.completions.create.mockResolvedValue(
+        stream({
+          choices: [{ delta: { content: "<think>ok 77</think>\nTo 49 USD." }, finish_reason: "stop" }],
+        })
+      );
+
+      await expect(api.sendMessage("Ile?", jest.fn())).resolves.toEqual({
+        text: "To 49 USD.",
+        truncated: false,
+      });
+    });
+
+    it("shows only the answer when the reply repeats the prompt", async () => {
+      const engine = await initializeLite();
+      engine.chat.completions.create.mockResolvedValue(
+        stream(
+          { choices: [{ delta: { content: "BAZA WIEDZY (KNOWLEDGE BASE):\nCennik\nPrzegląd: 49 USD.\n\n" } }] },
+          { choices: [{ delta: { content: "PYTANIE (QUESTION):\nIle?\n\nODPOWIEDŹ: " } }] },
+          { choices: [{ delta: { content: "Przegląd kosztuje 49 USD." }, finish_reason: "stop" }] }
+        )
+      );
+      const onToken = jest.fn<(token: string) => void>();
+
+      await expect(api.sendMessage("Ile?", onToken)).resolves.toEqual({
+        text: "Przegląd kosztuje 49 USD.",
+        truncated: false,
+      });
+      expect(onToken.mock.calls).toEqual([["Przegląd kosztuje 49 USD."]]);
+    });
+
+    it("shows the entry when the reply only repeats the prompt and runs out of tokens", async () => {
+      const engine = await initializeLite();
+      engine.chat.completions.create.mockResolvedValue(
+        stream({
+          choices: [
+            {
+              delta: { content: "BAZA WIEDZY (KNOWLEDGE BASE):\nCennik\nPrzegląd: 49 USD.\n\nPYTANIE" },
+              finish_reason: "length",
+            },
+          ],
+        })
+      );
+
+      await expect(api.sendMessage("Ile?", jest.fn())).resolves.toEqual({
+        text: "Cennik: Przegląd: 49 USD.",
+        truncated: false,
+        factChecked: "replaced",
+      });
+    });
+
+    it("gives the no-information reply when the reply only repeats the prompt and nothing matched", async () => {
+      retrieveEntriesMock.mockReturnValue({ language: "pl", results: [] });
+      const engine = await initializeLite();
+      engine.chat.completions.create.mockResolvedValue(
+        stream({
+          choices: [
+            {
+              delta: { content: "BAZA WIEDZY (KNOWLEDGE BASE):\n(no relevant information found)\n\nPYTANIE (QUESTION):\nIle?" },
+              finish_reason: "stop",
+            },
+          ],
+        })
+      );
+      const onToken = jest.fn<(token: string) => void>();
+
+      const result = await api.sendMessage("Ile?", onToken);
+
+      expect(result.factChecked).toBe("replaced");
+      expect(result.text).toMatch(/^Nie mam tej informacji\. Skontaktuj się z nami: /);
+      expect(onToken.mock.calls).toEqual([[result.text]]);
+
+      engine.chat.completions.create.mockResolvedValue(
+        stream({ choices: [{ delta: { content: "Dobrze." }, finish_reason: "stop" }] })
+      );
+      await api.sendMessage("Dzięki", jest.fn());
+      expect(engine.chat.completions.create.mock.calls[1]![0].messages.slice(3, 5)).toEqual([
+        { role: "user", content: "Ile?" },
+        { role: "assistant", content: result.text },
+      ]);
+    });
+
+    it("reports truncation only for an answer that was kept", async () => {
+      const engine = await initializeLite();
+      engine.chat.completions.create.mockResolvedValue(
+        stream({ choices: [{ delta: { content: "Przegląd kosztuje" }, finish_reason: "length" }] })
+      );
+
+      await expect(api.sendMessage("Ile?", jest.fn())).resolves.toEqual({
+        text: "Przegląd kosztuje",
+        truncated: true,
+      });
+    });
+
+    it("shows and stores nothing when the user aborts a lite reply", async () => {
+      const engine = await initializeLite();
+      engine.chat.completions.create.mockResolvedValue(
+        (async function* (): AsyncGenerator<Chunk> {
+          yield { choices: [{ delta: { content: "Częściowa" } }] };
+          api.abort();
+          throw new Error("interrupted");
+        })()
+      );
+      const onToken = jest.fn<(token: string) => void>();
+
+      await expect(api.sendMessage("Pytanie", onToken)).resolves.toEqual({
+        text: "",
+        truncated: false,
+        aborted: true,
+      });
+      expect(onToken).not.toHaveBeenCalled();
+
+      engine.chat.completions.create.mockResolvedValue(
+        stream({ choices: [{ delta: { content: "Dalej." }, finish_reason: "stop" }] })
+      );
+      await api.sendMessage("Następne", jest.fn());
+      // System prompt, the two example turns and the question: no history from the aborted reply.
+      expect(engine.chat.completions.create.mock.calls[1]![0].messages).toHaveLength(4);
+    });
+
+    it("shows nothing when the lite stream ends after an abort without throwing", async () => {
+      const engine = await initializeLite();
+      engine.chat.completions.create.mockResolvedValue(
+        (async function* (): AsyncGenerator<Chunk> {
+          yield { choices: [{ delta: { content: "Częściowa" } }] };
+          api.abort();
+        })()
+      );
+      const onToken = jest.fn<(token: string) => void>();
+
+      await expect(api.sendMessage("Pytanie", onToken)).resolves.toMatchObject({
+        text: "",
+        aborted: true,
+      });
+      expect(onToken).not.toHaveBeenCalled();
+    });
+
+    it("rethrows a lite generation error without showing anything", async () => {
+      const engine = await initializeLite();
+      engine.chat.completions.create.mockResolvedValue(
+        (async function* (): AsyncGenerator<Chunk> {
+          yield { choices: [{ delta: { content: "Częściowa" } }] };
+          throw new Error("gpu failure");
+        })()
+      );
+      const onToken = jest.fn<(token: string) => void>();
+
+      await expect(api.sendMessage("Pytanie", onToken)).rejects.toThrow("gpu failure");
+      expect(onToken).not.toHaveBeenCalled();
+    });
+
+    it("does not show or store an empty lite answer", async () => {
+      const engine = await initializeLite();
+      engine.chat.completions.create.mockResolvedValue(
+        stream({ choices: [{ delta: {}, finish_reason: "stop" }] })
+      );
+      const onToken = jest.fn<(token: string) => void>();
+
+      await expect(api.sendMessage("Pytanie", onToken)).resolves.toEqual({ text: "", truncated: false });
+      expect(onToken).not.toHaveBeenCalled();
+    });
+
+    it("sends only the last two exchanges of history to the lite model", async () => {
+      const engine = await initializeLite();
+      for (const [index, answer] of ["A1.", "A2.", "A3."].entries()) {
+        engine.chat.completions.create.mockResolvedValueOnce(
+          stream({ choices: [{ delta: { content: answer }, finish_reason: "stop" }] })
+        );
+        await api.sendMessage(`Q${index + 1}`, jest.fn());
+      }
+      engine.chat.completions.create.mockResolvedValueOnce(
+        stream({ choices: [{ delta: { content: "A4." }, finish_reason: "stop" }] })
+      );
+      await api.sendMessage("Q4", jest.fn());
+
+      const messages = engine.chat.completions.create.mock.calls[3]![0].messages;
+      expect(messages.slice(3, -1)).toEqual([
+        { role: "user", content: "Q2" },
+        { role: "assistant", content: "A2." },
+        { role: "user", content: "Q3" },
+        { role: "assistant", content: "A3." },
       ]);
     });
   });

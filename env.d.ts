@@ -21,6 +21,9 @@ interface ImportMetaEnv {
   readonly VITE_MAX_INPUT_CHARS?: string;
   readonly VITE_MAX_HISTORY_CHARS?: string;
   readonly VITE_MODEL_SIZE_HINT?: string;
+  readonly VITE_LITE_MODEL_ID?: string;
+  readonly VITE_LITE_MODEL_SIZE_HINT?: string;
+  readonly VITE_LITE_CONTEXT_WINDOW?: string;
 }
 
 interface ImportMeta {

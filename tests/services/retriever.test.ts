@@ -8,7 +8,9 @@ import {
 import { GENERIC_TOKENS, stemEnglish, stemPolish } from "../../src/services/retriever.helpers";
 import {
   detectLanguage,
+  formatContext,
   retrieve,
+  retrieveEntries,
   scoreDocument,
   scoreDocuments,
   type SearchResult,
@@ -465,5 +467,86 @@ describe("retrieve with loaded content", () => {
 
     expect(await retrieve("godziny otwarcia")).toBe("Godziny\nPolskie godziny.");
     expect(await retrieve("What are the hours?")).toBe("Hours\nEnglish hours.");
+  });
+});
+
+describe("retrieveEntries", () => {
+  const knowledgeBase = { en: KNOWLEDGE_BASE, pl: KNOWLEDGE_BASE_PL };
+  const hours = makeDocument("Opening hours", "Open 9:00–18:00.", ["hours", "open"]);
+  const saturday = makeDocument("Saturday hours", "Saturday 10:00–14:00.", ["hours", "saturday"]);
+  const price = makeDocument("Price list", "Service: 49 USD.", ["price", "cost"]);
+
+  it("returns the knowledge-base language with the results", () => {
+    const polish = retrieveEntries("Jakie są godziny otwarcia?", undefined, knowledgeBase);
+    const english = retrieveEntries("What are your opening hours?", undefined, knowledgeBase);
+
+    expect(polish.language).toBe("pl");
+    expect(polish.results[0]?.document.title).toBe("Godziny otwarcia");
+    expect(english.language).toBe("en");
+    expect(english.results[0]?.document.title).toBe("Opening Hours");
+  });
+
+  it("limits the number of entries with maxDocuments", () => {
+    const base = { en: [hours, saturday, price] };
+    // "hours" matches both hour entries equally.
+    const unlimited = retrieveEntries("hours", undefined, base);
+    const limited = retrieveEntries("hours", undefined, base, { maxDocuments: 1 });
+
+    expect(unlimited.results.length).toBeGreaterThan(1);
+    expect(limited.results).toHaveLength(1);
+    expect(limited.results[0]).toEqual(unlimited.results[0]);
+  });
+
+  it("keeps a second entry only when it scores close to the best one", () => {
+    const base = {
+      en: [
+        makeDocument("Tyre repair", "We repair tyres and wheels.", ["tyre", "wheel", "puncture"]),
+        makeDocument("Wheel truing", "Wheel truing and tyre fitting.", ["wheel", "tyre", "spokes"]),
+        // An unrelated entry, so words shared by the two above count as specific.
+        makeDocument("Gift cards", "Gift cards for any amount.", ["gift", "card"]),
+      ],
+    };
+    const titles = (options?: { minSecondScoreRatio: number }) =>
+      retrieveEntries("wheel tyre puncture", undefined, base, options).results.map(
+        ({ document }) => document.title
+      );
+
+    // The second entry scores about 74% of the best: inside the default relevance threshold,
+    // below the 90% the lite profile asks for.
+    expect(titles()).toEqual(["Tyre repair", "Wheel truing"]);
+    expect(titles({ minSecondScoreRatio: 0.9 })).toEqual(["Tyre repair"]);
+    expect(titles({ minSecondScoreRatio: 0.7 })).toEqual(["Tyre repair", "Wheel truing"]);
+  });
+
+  it("keeps both entries when they match equally", () => {
+    const base = { en: [hours, saturday] };
+    expect(retrieveEntries("hours", undefined, base, { minSecondScoreRatio: 0.9 }).results).toHaveLength(2);
+  });
+
+  it("uses the previous message for short follow-ups, like retrieve", () => {
+    const followUp = retrieveEntries("A w sobotę?", "Jakie są godziny otwarcia?", knowledgeBase, {
+      maxDocuments: 1,
+    });
+
+    expect(followUp.language).toBe("pl");
+    expect(followUp.results[0]?.document.title).toBe("Godziny otwarcia");
+  });
+
+  it("returns no results when nothing matches", () => {
+    expect(retrieveEntries("quantum chromodynamics", undefined, { en: [hours, price] })).toEqual({
+      language: "en",
+      results: [],
+    });
+  });
+});
+
+describe("formatContext", () => {
+  it("joins entries and respects a custom character limit", () => {
+    const first = makeDocument("First", "A".repeat(50));
+    const second = makeDocument("Second", "B".repeat(50));
+    const results = [first, second].map((document) => ({ document, score: 5 }));
+
+    expect(formatContext(results)).toBe(`First\n${"A".repeat(50)}\n\nSecond\n${"B".repeat(50)}`);
+    expect(formatContext(results, 80)).toBe(`First\n${"A".repeat(50)}`);
   });
 });

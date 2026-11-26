@@ -54,6 +54,22 @@ const LANGUAGE_SCORE_MARGIN = 1.5;
 export const MAX_CONTEXT_CHARS = 2400;
 const MAX_DOCUMENTS = 3;
 
+export interface RetrievalOptions {
+  /** Most entries to return. */
+  maxDocuments?: number;
+  /**
+   * A second entry is kept only if it scores at least this fraction of the best one, so a small
+   * model gets a single entry whenever one match clearly wins.
+   */
+  minSecondScoreRatio?: number;
+}
+
+export interface RetrievedEntries {
+  /** Knowledge-base language the entries come from ("pl" or "en"). */
+  language: string;
+  results: SearchResult[];
+}
+
 const tokenIsGeneric = (token: string, lang: string): boolean =>
   GENERIC_TOKENS.has(token) || GENERIC_TOKENS.has(canonicalizeToken(token, lang));
 
@@ -66,7 +82,7 @@ const truncateAtSentence = (text: string, limit: number): string => {
   return sentenceEnd > limit / 2 ? cut.slice(0, sentenceEnd + 1) : `${cut.trimEnd()}…`;
 };
 
-const formatContext = (results: SearchResult[]): string => {
+export const formatContext = (results: SearchResult[], maxChars = MAX_CONTEXT_CHARS): string => {
   const parts: string[] = [];
   let used = 0;
 
@@ -74,8 +90,8 @@ const formatContext = (results: SearchResult[]): string => {
     const entry = `${document.title}\n${document.content}`;
     const length = entry.length + (parts.length > 0 ? 2 : 0);
 
-    if (used + length > MAX_CONTEXT_CHARS) {
-      if (parts.length === 0) parts.push(truncateAtSentence(entry, MAX_CONTEXT_CHARS));
+    if (used + length > maxChars) {
+      if (parts.length === 0) parts.push(truncateAtSentence(entry, maxChars));
       break;
     }
 
@@ -97,15 +113,16 @@ const baseFor = (knowledgeBase: KnowledgeBases, lang: string): KnowledgeBase[] =
   (lang === "pl" ? knowledgeBase.pl : undefined) ?? knowledgeBase.en;
 
 /**
- * Retrieves knowledge-base entries for a message. For a follow-up with little content of its
- * own (for example "And for kids?" or "How much is that?"), the previous user message is
- * added to the query at a reduced weight.
+ * Finds knowledge-base entries for a message. For a follow-up with little content of its own
+ * (for example "And for kids?" or "How much is that?"), the previous user message is added to
+ * the query at a reduced weight.
  */
-export const retrieve = async (
+export const retrieveEntries = (
   content: string,
   previousContent?: string,
-  knowledgeBase: KnowledgeBases = getContent().knowledgeBase
-): Promise<string> => {
+  knowledgeBase: KnowledgeBases = getContent().knowledgeBase,
+  options: RetrievalOptions = {}
+): RetrievedEntries => {
   const lang = resolveLanguage(content, knowledgeBase, previousContent);
   const base = baseFor(knowledgeBase, lang);
   // Raw tokens: scoreDocument canonicalizes them itself and needs the raw form for fuzzy matching.
@@ -129,8 +146,23 @@ export const retrieve = async (
     if (combined.length > 0) results = combined;
   }
 
-  return formatContext(results);
+  return { language: lang, results: limitResults(results, options) };
 };
+
+const limitResults = (results: SearchResult[], options: RetrievalOptions): SearchResult[] => {
+  const limited = results.slice(0, options.maxDocuments ?? MAX_DOCUMENTS);
+  const ratio = options.minSecondScoreRatio;
+  const top = limited[0];
+  if (ratio === undefined || !top) return limited;
+  return [top, ...limited.slice(1).filter((result) => result.score >= top.score * ratio)];
+};
+
+/** Retrieves knowledge-base entries for a message and formats them as prompt context. */
+export const retrieve = async (
+  content: string,
+  previousContent?: string,
+  knowledgeBase: KnowledgeBases = getContent().knowledgeBase
+): Promise<string> => formatContext(retrieveEntries(content, previousContent, knowledgeBase).results);
 
 const documentFrequency = (documents: IndexedDocument[], token: string): number =>
   documents.filter(

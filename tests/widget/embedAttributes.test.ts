@@ -22,8 +22,15 @@ describe("readEmbedAttributes", () => {
     expect(readEmbedAttributes(document)).toEqual({ contentSrc: "/kb.json", lang: "pl" });
   });
 
+  it("reads the model tier", () => {
+    document.body.innerHTML = '<script data-ai-chat-widget data-model-tier=" lite "></script>';
+
+    expect(readEmbedAttributes(document)).toEqual({ modelTier: "lite" });
+  });
+
   it("omits blank values", () => {
-    document.body.innerHTML = '<script data-ai-chat-widget data-content-src=" " data-lang=""></script>';
+    document.body.innerHTML =
+      '<script data-ai-chat-widget data-content-src=" " data-lang="" data-model-tier=" "></script>';
 
     expect(readEmbedAttributes(document)).toEqual({});
   });
